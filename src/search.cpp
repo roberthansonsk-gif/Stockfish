@@ -881,10 +881,13 @@ Value Search::Worker::search(
     improving         = ss->staticEval > (ss - 2)->staticEval;
     opponentWorsening = ss->staticEval > -(ss - 1)->staticEval;
 
-    // Hindsight adjustment of reductions based on static evaluation difference
-    if (priorReduction >= 3 && !opponentWorsening)
+    // Hindsight adjustment of reductions based on static evaluation difference.
+    // Not when in check: staticEval is then copied from (ss - 2), so the
+    // difference would judge our previous move, not the reduced one.
+    if (!ss->inCheck && priorReduction >= 3 && !opponentWorsening)
         depth++;
-    if (priorReduction >= 2 && depth >= 2 && ss->staticEval + (ss - 1)->staticEval > 166)
+    if (!ss->inCheck && priorReduction >= 2 && depth >= 2
+        && ss->staticEval + (ss - 1)->staticEval > 166)
         depth--;
 
     // Step 6. At non-PV nodes we check for an early TT cutoff. Note that we
@@ -1378,7 +1381,8 @@ moves_loop:  // When in check, search starts here
         // Decrease/increase reduction for moves with a good/bad history
         r -= ss->statScore * 439 / 4096;
 
-        if (!capture && !is_decisive(alpha))
+        // In check eval is only the static eval of (ss - 2), so do not use it here
+        if (!capture && !ss->inCheck && !is_decisive(alpha))
             r += 3 * std::clamp(alpha - eval, -64, 96);
 
         // Scale up reductions for expected ALL nodes
