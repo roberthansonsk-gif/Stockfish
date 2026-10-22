@@ -1145,7 +1145,8 @@ moves_loop:  // When in check, search starts here
 
     value = bestValue;
 
-    int moveCount = 0;
+    int moveCount   = 0;
+    int alphaRaises = 0;
 
     // Step 14. Loop through all legal moves until no moves remain
     // or a beta cutoff occurs.
@@ -1345,7 +1346,7 @@ moves_loop:  // When in check, search starts here
                + (ttData.depth >= depth) * (816 + cutNode * 940);
 
         // Base reduction offset to compensate for other tweaks
-        r += 697;
+        r += 697 + 450 * std::min(alphaRaises, 4);
 
         r -= moveCount * 65;
         r -= std::abs(correctionValue) / 26310;
@@ -1563,8 +1564,12 @@ moves_loop:  // When in check, search starts here
                 }
 
                 // Reduce other moves if we have found at least one score improvement
-                if (depth > 3 && depth < 12 && !is_decisive(value))
-                    depth -= 3;
+                if (!is_decisive(value))
+                {
+                    ++alphaRaises;
+                    if (depth > 3 && depth < 12)
+                        depth -= 3;
+                }
 
                 assert(depth > 0);
                 alpha = value;  // Update alpha! Always alpha < beta
