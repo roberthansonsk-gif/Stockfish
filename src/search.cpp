@@ -581,10 +581,14 @@ bool Search::Worker::iterative_deepening() {
         {
             u64 nodesEffort = rootMoves[0].effort * 100000 / std::max(u64(1), u64(nodes));
 
-            double fallingEval = (11.48 + 2.30 * (mainThread->bestPreviousAverageScore - bestValue)
+            const bool  firstSearch = mainThread->bestPreviousAverageScore == VALUE_INFINITE;
+            const Value prevScore   = firstSearch ? mainThread->iterValue[iterIdx]
+                                                  : mainThread->bestPreviousAverageScore;
+
+            double fallingEval = (11.48 + 2.30 * (prevScore - bestValue)
                                   + 1.1 * (mainThread->iterValue[iterIdx] - bestValue))
                                / 100.0;
-            fallingEval = std::clamp(fallingEval, 0.576, 1.728);
+            fallingEval = std::clamp(fallingEval, firstSearch ? 1.0 : 0.576, 1.728);
 
             // If the bestMove is stable over several iterations, reduce time accordingly
             timeReduction = std::clamp(
@@ -604,8 +608,10 @@ bool Search::Worker::iterative_deepening() {
 
             double bestMoveInstability = 1.077 + 2.229 * totBestMoveChanges / threads.size();
 
-            double highBestMoveEffort = std::clamp(
-              interpolate(i64(nodesEffort), i64(75800), i64(104510), 0.969, 0.714), 0.693, 0.838);
+            double highBestMoveEffort =
+              std::clamp(
+                interpolate(i64(nodesEffort), i64(75800), i64(104510), 0.969, 0.714), 0.693, 0.838)
+              + 0.0000025 * std::max(i64(0), i64(56000) - i64(nodesEffort));
 
             double totalTime = mainThread->tm.optimum() * fallingEval * reduction
                              * bestMoveInstability * highBestMoveEffort;
@@ -881,10 +887,13 @@ Value Search::Worker::search(
     improving         = ss->staticEval > (ss - 2)->staticEval;
     opponentWorsening = ss->staticEval > -(ss - 1)->staticEval;
 
-    // Hindsight adjustment of reductions based on static evaluation difference
-    if (priorReduction >= 3 && !opponentWorsening)
+    // Hindsight adjustment of reductions based on static evaluation difference.
+    // Not when in check: staticEval is then copied from (ss - 2), so the
+    // difference would judge our previous move, not the reduced one.
+    if (!ss->inCheck && priorReduction >= 3 && !opponentWorsening)
         depth++;
-    if (priorReduction >= 2 && depth >= 2 && ss->staticEval + (ss - 1)->staticEval > 166)
+    if (!ss->inCheck && priorReduction >= 2 && depth >= 2
+        && ss->staticEval + (ss - 1)->staticEval > 166)
         depth--;
 
     // Step 6. At non-PV nodes we check for an early TT cutoff. Note that we
@@ -1133,7 +1142,16 @@ moves_loop:  // When in check, search starts here
     probCutBeta = beta + 428;
     if ((ttData.bound & BOUND_LOWER) && ttData.depth >= depth - 4 && ttData.value >= probCutBeta
         && !is_decisive(beta) && is_valid(ttData.value) && !is_decisive(ttData.value) && !seekMate)
+    {
+        // Update move sorting heuristics as for a regular TT cutoff
+        if (ttData.move && !ttCapture)
+            update_quiet_histories(pos, ss, *this, ttData.move, 131 * depth);
+
+        if (ttData.move && prevSq != SQ_NONE && (ss - 1)->moveCount < 5 && !priorCapture)
+            update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, -2210);
+
         return probCutBeta;
+    }
 
     const PieceToHistory* contHist[] = {
       (ss - 1)->continuationHistory, (ss - 2)->continuationHistory, (ss - 3)->continuationHistory,
@@ -1203,7 +1221,12 @@ moves_loop:  // When in check, search starts here
             if (capture || givesCheck)
             {
                 Piece capturedPiece = pos.piece_on(move.to_sq());
-                int   captHist = captureHistory[movedPiece][move.to_sq()][type_of(capturedPiece)];
+                // Quiet checks never update capture history, use continuation history instead
+                int captHist = capture
+                               ? captureHistory[movedPiece][move.to_sq()][type_of(capturedPiece)]
+                               : ((*contHist[0])[movedPiece][move.to_sq()]
+                                  + (*contHist[1])[movedPiece][move.to_sq()])
+                                   / 2;
 
                 // Futility pruning for captures
                 if (!givesCheck && lmrDepth < 8)
@@ -1283,10 +1306,13 @@ moves_loop:  // When in check, search starts here
 
             if (value < singularBeta)
             {
+                // A singular capture that loses material by SEE is a sacrifice rather
+                // than an obvious recapture, so extend it with the margins of a quiet move.
+                int quietLike    = !ttCapture || !pos.see_ge(move, 0);
                 int corrValAdj   = std::abs(correctionValue) / 198368;
-                int doubleMargin = -2 + 204 * PvNode - 152 * !ttCapture - corrValAdj
+                int doubleMargin = -2 + 204 * PvNode - 152 * quietLike - corrValAdj
                                  - 1175 * ttMoveHistory / 114178 - (ss->ply > rootDepth) * 38;
-                int tripleMargin = 70 + 279 * PvNode - 188 * !ttCapture + 81 * ss->ttPv - corrValAdj
+                int tripleMargin = 70 + 279 * PvNode - 188 * quietLike + 81 * ss->ttPv - corrValAdj
                                  - (ss->ply > rootDepth) * 43;
 
                 extension =
@@ -1378,7 +1404,8 @@ moves_loop:  // When in check, search starts here
         // Decrease/increase reduction for moves with a good/bad history
         r -= ss->statScore * 439 / 4096;
 
-        if (!capture && !is_decisive(alpha))
+        // In check eval is only the static eval of (ss - 2), so do not use it here
+        if (!capture && !ss->inCheck && !is_decisive(alpha))
             r += 3 * std::clamp(alpha - eval, -64, 96);
 
         // Scale up reductions for expected ALL nodes
@@ -1448,6 +1475,11 @@ moves_loop:  // When in check, search starts here
             if (move == ttData.move
                 && ((is_valid(ttData.value) && is_decisive(ttData.value) && ttData.depth > 0)
                     || ttData.depth > 1))
+                newDepth = std::max(newDepth, 1);
+
+            // Likewise keep checking moves out of qsearch: there the check would only
+            // get one evasion ply before stand pat, hiding mating and perpetual lines.
+            if (givesCheck)
                 newDepth = std::max(newDepth, 1);
 
             value = -search<PV>(pos, ss + 1, -beta, -alpha, newDepth, false);
