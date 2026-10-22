@@ -1283,10 +1283,13 @@ moves_loop:  // When in check, search starts here
 
             if (value < singularBeta)
             {
+                // A singular capture that loses material by SEE is a sacrifice rather
+                // than an obvious recapture, so extend it with the margins of a quiet move.
+                int quietLike    = !ttCapture || !pos.see_ge(move, 0);
                 int corrValAdj   = std::abs(correctionValue) / 198368;
-                int doubleMargin = -2 + 204 * PvNode - 152 * !ttCapture - corrValAdj
+                int doubleMargin = -2 + 204 * PvNode - 152 * quietLike - corrValAdj
                                  - 1175 * ttMoveHistory / 114178 - (ss->ply > rootDepth) * 38;
-                int tripleMargin = 70 + 279 * PvNode - 188 * !ttCapture + 81 * ss->ttPv - corrValAdj
+                int tripleMargin = 70 + 279 * PvNode - 188 * quietLike + 81 * ss->ttPv - corrValAdj
                                  - (ss->ply > rootDepth) * 43;
 
                 extension =
@@ -1448,6 +1451,11 @@ moves_loop:  // When in check, search starts here
             if (move == ttData.move
                 && ((is_valid(ttData.value) && is_decisive(ttData.value) && ttData.depth > 0)
                     || ttData.depth > 1))
+                newDepth = std::max(newDepth, 1);
+
+            // Likewise keep checking moves out of qsearch: there the check would only
+            // get one evasion ply before stand pat, hiding mating and perpetual lines.
+            if (givesCheck)
                 newDepth = std::max(newDepth, 1);
 
             value = -search<PV>(pos, ss + 1, -beta, -alpha, newDepth, false);
