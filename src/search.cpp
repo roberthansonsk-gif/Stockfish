@@ -1450,6 +1450,11 @@ moves_loop:  // When in check, search starts here
                     || ttData.depth > 1))
                 newDepth = std::max(newDepth, 1);
 
+            // Likewise keep checking moves out of qsearch: there the check would only
+            // get one evasion ply before stand pat, hiding mating and perpetual lines.
+            if (givesCheck)
+                newDepth = std::max(newDepth, 1);
+
             value = -search<PV>(pos, ss + 1, -beta, -alpha, newDepth, false);
         }
 
