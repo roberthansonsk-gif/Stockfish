@@ -1193,8 +1193,9 @@ moves_loop:  // When in check, search starts here
         // Depth conditions are important for mate finding.
         if (!rootNode && pos.non_pawn_material(us) && !is_loss(bestValue))
         {
-            // Skip quiet moves if movecount exceeds our threshold
-            if (moveCount >= (3 + depth * depth) / (2 - improving))
+            // Skip quiet moves if movecount exceeds our threshold. When the ttMove
+            // is a capture, quiet moves are less likely to be best, so skip earlier.
+            if (moveCount >= (3 + depth * depth) / (2 - improving) - ttCapture)
                 mp.skip_quiet_moves();
 
             // Reduced depth of the next LMR search
@@ -1409,7 +1410,7 @@ moves_loop:  // When in check, search starts here
             {
                 // Adjust full-depth search based on LMR results - if the result was
                 // good enough search deeper, if it was bad enough search shallower.
-                const bool doDeeperSearch    = d < newDepth && value > bestValue + 53;
+                const bool doDeeperSearch    = d < newDepth && value > bestValue + 53 - 15 * ttCapture;
                 const bool doShallowerSearch = value < bestValue + 8;
 
                 newDepth += doDeeperSearch - doShallowerSearch;
