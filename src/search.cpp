@@ -1133,7 +1133,16 @@ moves_loop:  // When in check, search starts here
     probCutBeta = beta + 428;
     if ((ttData.bound & BOUND_LOWER) && ttData.depth >= depth - 4 && ttData.value >= probCutBeta
         && !is_decisive(beta) && is_valid(ttData.value) && !is_decisive(ttData.value) && !seekMate)
+    {
+        // Update move sorting heuristics as for a regular TT cutoff
+        if (ttData.move && !ttCapture)
+            update_quiet_histories(pos, ss, *this, ttData.move, 131 * depth);
+
+        if (ttData.move && prevSq != SQ_NONE && (ss - 1)->moveCount < 5 && !priorCapture)
+            update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, -2210);
+
         return probCutBeta;
+    }
 
     const PieceToHistory* contHist[] = {
       (ss - 1)->continuationHistory, (ss - 2)->continuationHistory, (ss - 3)->continuationHistory,
