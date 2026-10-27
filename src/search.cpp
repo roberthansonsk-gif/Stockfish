@@ -336,7 +336,14 @@ bool Search::Worker::iterative_deepening() {
     int  failHighRecovery   = 0;
     bool uciPvSent          = false;
 
-    lowPlyHistory.fill(102);
+    // Two plies have been played since the previous search: what was ply i + 2
+    // is now ply i (same side to move). Shift the low ply history accordingly,
+    // blending halfway back towards the neutral value.
+    for (int i = 0; i < LOW_PLY_HISTORY_SIZE; ++i)
+        for (int j = 0; j < UINT_16_HISTORY_SIZE; ++j)
+            lowPlyHistory[i][j] =
+              i + 2 < LOW_PLY_HISTORY_SIZE ? i16(102 + (int(lowPlyHistory[i + 2][j]) - 102) / 2)
+                                           : i16(102);
 
     for (Color c : {WHITE, BLACK})
         for (int i = 0; i < UINT_16_HISTORY_SIZE; i++)
@@ -386,8 +393,9 @@ bool Search::Worker::iterative_deepening() {
             selDepth = 0;
 
             // Reset aspiration window starting size
-            delta     = 5 + threadIdx % 8 + std::abs(rootMoves[pvIdx].meanSquaredScore) / 10193;
             Value avg = rootMoves[pvIdx].averageScore;
+            delta     = 5 + threadIdx % 8 + std::abs(rootMoves[pvIdx].meanSquaredScore) / 10193
+                      + std::abs(avg - rootMoves[pvIdx].previousScore) / 4;
             alpha     = std::max(avg - delta, -VALUE_INFINITE);
             beta      = std::min(avg + delta, VALUE_INFINITE);
 
@@ -397,7 +405,7 @@ bool Search::Worker::iterative_deepening() {
               seekMateScore != -VALUE_INFINITE && std::abs(seekMateScore) >= seekMateThreshold;
 
             // Adjust optimism based on root move's averageScore
-            optimism[us]  = 456 * avg / (std::abs(avg) + 85);
+            optimism[us]  = avg != -VALUE_INFINITE ? 456 * avg / (std::abs(avg) + 85) : VALUE_ZERO;
             optimism[~us] = -optimism[us];
 
             // Start with a small aspiration window and, in the case of a fail
@@ -411,6 +419,7 @@ bool Search::Worker::iterative_deepening() {
                 // effective increment for every four searchAgain steps (see issue #2717).
                 Depth adjustedDepth = std::max(1, rootDepth - failedHighCnt - failHighRecovery
                                                     - 3 * (searchAgainCounter + 1) / 4);
+                searchRootDepth     = adjustedDepth;
                 bestValue           = search<Root>(rootPos, ss, alpha, beta, adjustedDepth, false);
 
                 // Bring the best move to the front. It is critical that sorting
@@ -586,10 +595,14 @@ bool Search::Worker::iterative_deepening() {
         {
             u64 nodesEffort = rootMoves[0].effort * 100000 / std::max(u64(1), u64(nodes));
 
-            double fallingEval = (11.48 + 2.30 * (mainThread->bestPreviousAverageScore - bestValue)
+            const bool  firstSearch = mainThread->bestPreviousAverageScore == VALUE_INFINITE;
+            const Value prevScore   = firstSearch ? mainThread->iterValue[iterIdx]
+                                                  : mainThread->bestPreviousAverageScore;
+
+            double fallingEval = (11.48 + 2.30 * (prevScore - bestValue)
                                   + 1.1 * (mainThread->iterValue[iterIdx] - bestValue))
                                / 100.0;
-            fallingEval = std::clamp(fallingEval, 0.576, 1.728);
+            fallingEval = std::clamp(fallingEval, firstSearch ? 1.0 : 0.576, 1.728);
 
             // If the bestMove is stable over several iterations, reduce time accordingly
             timeReduction = std::clamp(
@@ -609,8 +622,10 @@ bool Search::Worker::iterative_deepening() {
 
             double bestMoveInstability = 1.077 + 2.229 * totBestMoveChanges / threads.size();
 
-            double highBestMoveEffort = std::clamp(
-              interpolate(i64(nodesEffort), i64(75800), i64(104510), 0.969, 0.714), 0.693, 0.838);
+            double highBestMoveEffort =
+              std::clamp(
+                interpolate(i64(nodesEffort), i64(75800), i64(104510), 0.969, 0.714), 0.693, 0.838)
+              + 0.0000025 * std::max(i64(0), i64(56000) - i64(nodesEffort));
 
             double totalTime = mainThread->tm.optimum() * fallingEval * reduction
                              * bestMoveInstability * highBestMoveEffort;
@@ -716,6 +731,7 @@ void Search::Worker::undo_null_move(Position& pos) { pos.undo_null_move(); }
 void Search::Worker::clear() {
     mainHistory.fill(-5);
     captureHistory.fill(-742);
+    lowPlyHistory.fill(102);
 
     // Each thread clears its part of the dynamically-sized shared histories.
     // The constant-size continuation history is initialized by thread 0 of each NUMA node.
@@ -1402,7 +1418,7 @@ moves_loop:  // When in check, search starts here
             // beyond the first move depth. To avoid search explosion, extensions
             // are not allowed deep, relative to rootDepth, in the search tree.
             Depth d =
-              std::max(1, newDepth + std::min(-r / 1024, ss->ply < 2 * rootDepth ? 2 : 0)) + PvNode;
+              std::max(1, newDepth + std::min(-r / 1024, ss->ply < 2 * searchRootDepth ? 2 : 0)) + PvNode;
 
             ss->reduction = newDepth - d;
             value         = -search<NonPV>(pos, ss + 1, -(alpha + 1), -alpha, d, true);
@@ -1631,6 +1647,9 @@ moves_loop:  // When in check, search starts here
                                       scaledBonus * 263 / 16384);
 
         mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 215 / 32768;
+
+        if (ss->ply <= LOW_PLY_HISTORY_SIZE)
+            lowPlyHistory[ss->ply - 1][((ss - 1)->currentMove).raw()] << scaledBonus * 150 / 32768;
 
         if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
             sharedHistory.pawn_entry(pos)[pos.piece_on(prevSq)][prevSq] << scaledBonus * 324 / 8192;
