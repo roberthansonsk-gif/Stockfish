@@ -250,9 +250,11 @@ ExtMove* MovePicker::generate_and_score() {
         else  // Type == EVASIONS
         {
             if (pos.capture_stage(m))
-                m.value = PieceValue[capturedPiece] + (1 << 28);
+                m.value = 7 * int(PieceValue[capturedPiece])
+                        + (*captureHistory)[pc][to][type_of(capturedPiece)] + (1 << 28);
             else
-                m.value = (*mainHistory)[us][m.raw()] + (*continuationHistory[0])[pc][to];
+                m.value = (*mainHistory)[us][m.raw()] + (*continuationHistory[0])[pc][to]
+                        + sharedHistory->pawn_entry(pos)[pc][to];
         }
     }
     return it;
