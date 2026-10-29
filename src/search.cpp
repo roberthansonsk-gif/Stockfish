@@ -336,7 +336,11 @@ bool Search::Worker::iterative_deepening() {
     int  failHighRecovery   = 0;
     bool uciPvSent          = false;
 
-    lowPlyHistory.fill(102);
+    for (int i = 0; i < LOW_PLY_HISTORY_SIZE; ++i)
+        for (int j = 0; j < UINT_16_HISTORY_SIZE; ++j)
+            lowPlyHistory[i][j] =
+              i + 2 < LOW_PLY_HISTORY_SIZE ? i16(102 + (int(lowPlyHistory[i + 2][j]) - 102) / 2)
+                                           : i16(102);
 
     for (Color c : {WHITE, BLACK})
         for (int i = 0; i < UINT_16_HISTORY_SIZE; i++)
@@ -714,6 +718,7 @@ void Search::Worker::undo_null_move(Position& pos) { pos.undo_null_move(); }
 void Search::Worker::clear() {
     mainHistory.fill(-5);
     captureHistory.fill(-742);
+    lowPlyHistory.fill(102);
 
     // Each thread clears its part of the dynamically-sized shared histories.
     // The constant-size continuation history is initialized by thread 0 of each NUMA node.
@@ -1630,6 +1635,9 @@ moves_loop:  // When in check, search starts here
                                       scaledBonus * 263 / 16384);
 
         mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 215 / 32768;
+
+        if (ss->ply <= LOW_PLY_HISTORY_SIZE)
+            lowPlyHistory[ss->ply - 1][((ss - 1)->currentMove).raw()] << scaledBonus * 150 / 32768;
 
         if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
             sharedHistory.pawn_entry(pos)[pos.piece_on(prevSq)][prevSq] << scaledBonus * 324 / 8192;
