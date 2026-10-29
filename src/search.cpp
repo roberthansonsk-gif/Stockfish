@@ -386,8 +386,9 @@ bool Search::Worker::iterative_deepening() {
             selDepth = 0;
 
             // Reset aspiration window starting size
-            delta     = 5 + threadIdx % 8 + std::abs(rootMoves[pvIdx].meanSquaredScore) / 10193;
             Value avg = rootMoves[pvIdx].averageScore;
+            delta     = 5 + threadIdx % 8 + std::abs(rootMoves[pvIdx].meanSquaredScore) / 10193
+                      + std::abs(avg - rootMoves[pvIdx].previousScore) / 4;
             alpha     = std::max(avg - delta, -VALUE_INFINITE);
             beta      = std::min(avg + delta, VALUE_INFINITE);
 
@@ -395,7 +396,7 @@ bool Search::Worker::iterative_deepening() {
                     && std::abs(rootMoves[pvIdx].previousScore) >= seekMateThreshold;
 
             // Adjust optimism based on root move's averageScore
-            optimism[us]  = 456 * avg / (std::abs(avg) + 85);
+            optimism[us]  = avg != -VALUE_INFINITE ? 456 * avg / (std::abs(avg) + 85) : VALUE_ZERO;
             optimism[~us] = -optimism[us];
 
             // Start with a small aspiration window and, in the case of a fail
@@ -584,10 +585,14 @@ bool Search::Worker::iterative_deepening() {
         {
             u64 nodesEffort = rootMoves[0].effort * 100000 / std::max(u64(1), u64(nodes));
 
-            double fallingEval = (11.48 + 2.30 * (mainThread->bestPreviousAverageScore - bestValue)
+            const bool  firstSearch = mainThread->bestPreviousAverageScore == VALUE_INFINITE;
+            const Value prevScore   = firstSearch ? mainThread->iterValue[iterIdx]
+                                                  : mainThread->bestPreviousAverageScore;
+
+            double fallingEval = (11.48 + 2.30 * (prevScore - bestValue)
                                   + 1.1 * (mainThread->iterValue[iterIdx] - bestValue))
                                / 100.0;
-            fallingEval = std::clamp(fallingEval, 0.576, 1.728);
+            fallingEval = std::clamp(fallingEval, firstSearch ? 1.0 : 0.576, 1.728);
 
             // If the bestMove is stable over several iterations, reduce time accordingly
             timeReduction = std::clamp(
