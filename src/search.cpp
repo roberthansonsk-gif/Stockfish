@@ -1287,10 +1287,11 @@ moves_loop:  // When in check, search starts here
 
             if (value < singularBeta)
             {
+                int quietLike    = !ttCapture || !pos.see_ge(move, 0);
                 int corrValAdj   = std::abs(correctionValue) / 198368;
-                int doubleMargin = -2 + 204 * PvNode - 152 * !ttCapture - corrValAdj
+                int doubleMargin = -2 + 204 * PvNode - 152 * quietLike - corrValAdj
                                  - 1175 * ttMoveHistory / 114178 - (ss->ply > rootDepth) * 38;
-                int tripleMargin = 70 + 279 * PvNode - 188 * !ttCapture + 81 * ss->ttPv - corrValAdj
+                int tripleMargin = 70 + 279 * PvNode - 188 * quietLike + 81 * ss->ttPv - corrValAdj
                                  - (ss->ply > rootDepth) * 43;
 
                 extension =
@@ -1363,7 +1364,7 @@ moves_loop:  // When in check, search starts here
             r += 1079;
 
         // Increase reduction if next ply has a lot of fail high
-        if ((ss + 1)->cutoffCnt > 1)
+        if ((ss + 1)->cutoffCnt > 1 && extension <= 0)
             r += 264 + 1095 * ((ss + 1)->cutoffCnt > 2) + 1138 * allNode;
 
         // For first picked move (ttMove) reduce reduction
@@ -1665,7 +1666,7 @@ moves_loop:  // When in check, search starts here
 
     // Adjust correction history if the best move is not a capture and
     // the error direction matches whether we are above/below bounds.
-    if (!ss->inCheck && !(bestMove && pos.capture(bestMove))
+    if (!ss->inCheck && !(bestMove && pos.capture(bestMove) && pos.see_ge(bestMove, 0))
         && (bestValue > ss->staticEval) == bool(bestMove))
     {
         auto bonus =
