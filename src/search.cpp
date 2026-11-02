@@ -2003,8 +2003,8 @@ void update_all_stats(const Position& pos,
     Piece                  movedPiece     = pos.moved_piece(bestMove);
     PieceType              capturedPiece;
 
-    int bonus =
-      std::min(133 * depth - 81, 1487) + 364 * (bestMove == ttMove) + (ss - 1)->statScore / 28;
+    int bonus = std::max(
+      std::min(133 * depth - 81, 1487) + 364 * (bestMove == ttMove) + (ss - 1)->statScore / 28, 0);
     int malus = std::min(968 * depth - 235, 2244);
 
     if (!PvNode)
@@ -2083,7 +2083,8 @@ void update_quiet_histories(
     workerThread.mainHistory[us][move.raw()] << bonus;  // Untuned to prevent duplicate effort
 
     if (ss->ply < LOW_PLY_HISTORY_SIZE)
-        workerThread.lowPlyHistory[ss->ply][move.raw()] << bonus * 712 / 1024;
+        workerThread.lowPlyHistory[ss->ply][move.raw()]
+          << bonus * (bonus > 0 ? 816 : 608) / 1024;
 
     update_continuation_histories(ss, pos.moved_piece(move), move.to_sq(), bonus * 750 / 1024);
 
