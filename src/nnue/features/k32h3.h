@@ -21,6 +21,8 @@
 #ifndef NNUE_FEATURES_K32H3_H_INCLUDED
 #define NNUE_FEATURES_K32H3_H_INCLUDED
 
+#include <array>
+
 #include "../../misc.h"
 #include "../../types.h"
 #include "../nnue_common.h"
@@ -70,16 +72,11 @@ class K32H3 {
     //   2: the opponent has a queen.
     static constexpr int NumBlocks = 3;
 
-    struct BlockState {
-        int queens[COLOR_NB];
-        int rooksAndQueens;
-    };
+    using BlockState = std::array<u8, COLOR_NB>;
 
-    static constexpr int block(const BlockState& m, Color perspective) {
-        return m.queens[~perspective] ? 2 : m.rooksAndQueens > 0;
-    }
-    static int        block(const Position& pos, Color perspective);
-    static BlockState block_state(const Position& pos);
+    static constexpr int block(const BlockState& m, Color perspective) { return m[perspective]; }
+    static int           block(const Position& pos, Color perspective);
+    static BlockState    block_state(const Position& pos);
 
     // Number of features per block (22,528 piece-squares)
     static constexpr IndexType BlockDimensions =
@@ -107,6 +104,21 @@ class K32H3 {
     // clang-format on
 #undef B
 
+    alignas(64) static constexpr auto Offsets = [] {
+        std::array<std::array<std::array<u16, PIECE_NB>, SQUARE_NB>, COLOR_NB> table{};
+        for (int c = 0; c < COLOR_NB; ++c)
+            for (int sq = 0; sq < SQUARE_NB; ++sq)
+            {
+                const u16 flip       = 56 * c;
+                const u16 orient     = u16(OrientTBL[sq]) ^ flip;
+                const u16 kingBucket = u16(KingBuckets[sq ^ flip]);
+                for (int pieceIndex = 0; pieceIndex < PIECE_NB; ++pieceIndex)
+                    table[c][sq][pieceIndex] =
+                      PieceSquareIndex[c][pieceIndex] + kingBucket + orient;
+            }
+        return table;
+    }();
+
     // Maximum number of simultaneously active features.
     static constexpr IndexType MaxActiveDimensions = 32;
     using IndexList                                = ValueList<u16, MaxActiveDimensions>;
@@ -126,18 +138,39 @@ class K32H3 {
 
     // Index of a feature within its block for a given king position and another piece
     // on some square
-    static IndexType make_index(Color perspective, Square s, Piece pc, Square ksq);
+    static sf_always_inline IndexType
+    make_index(Color perspective, Square s, Piece pc, Square ksq) {
+        return IndexType(s) ^ Offsets[perspective][ksq][pc];
+    }
 
     // Get a list of indices for recently changed features
-    static void append_changed_indices(
-      Color perspective, Square ksq, const DiffType& diff, IndexList& removed, IndexList& added);
+    static sf_always_inline void append_changed_indices(Color           perspective,
+                                                        Square          ksq,
+                                                        const DiffType& diff,
+                                                        IndexList& RESTRICT removed,
+                                                        IndexList& RESTRICT added) {
+        const auto& row      = Offsets[perspective][ksq];
+        const u16   pcOffset = row[diff.pc];
+
+        removed.push_back(IndexType(diff.from) ^ pcOffset);
+        if (diff.to != SQ_NONE)
+            added.push_back(IndexType(diff.to) ^ pcOffset);
+
+        if (diff.remove_sq != SQ_NONE)
+            removed.push_back(IndexType(diff.remove_sq) ^ row[diff.remove_pc]);
+
+        if (diff.add_sq != SQ_NONE)
+            added.push_back(IndexType(diff.add_sq) ^ row[diff.add_pc]);
+    }
 
     // Returns whether the change stored in this DirtyPiece means that a full
     // accumulator refresh is required
-    static bool requires_refresh(const DiffType&   diff,
-                                 Color             perspective,
-                                 const BlockState& before,
-                                 const BlockState& after);
+    static constexpr bool requires_refresh(const DiffType&   diff,
+                                           Color             perspective,
+                                           const BlockState& before,
+                                           const BlockState& after) {
+        return diff.pc == make_piece(perspective, KING) || before[perspective] != after[perspective];
+    }
 };
 
 }  // namespace Stockfish::Eval::NNUE::Features
