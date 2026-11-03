@@ -37,12 +37,6 @@
 
 namespace Stockfish {
 
-static int simple_eval(const Position& pos) {
-    const Color c = pos.side_to_move();
-    return PawnValue * (pos.count<PAWN>(c) - pos.count<PAWN>(~c)) + pos.non_pawn_material(c)
-         - pos.non_pawn_material(~c);
-}
-
 Value scale_evaluation(Value nnue, int optimism, const Position& pos);
 
 Value Eval::evaluate(const Eval::NNUE::Network&     network,
@@ -58,7 +52,13 @@ Value Eval::evaluate(const Eval::NNUE::Network&     network,
 
 // Applies search-dependent scaling (optimism and rule50) to the raw NNUE eval
 Value scale_evaluation(Value nnue, int optimism, const Position& pos) {
-    Value se = simple_eval(pos);
+    const int   wp   = pos.count<PAWN>(WHITE);
+    const int   bp   = pos.count<PAWN>(BLACK);
+    const Value wnpm = pos.non_pawn_material(WHITE);
+    const Value bnpm = pos.non_pawn_material(BLACK);
+
+    const int   whiteSe = PawnValue * (wp - bp) + wnpm - bnpm;
+    const Value se      = pos.side_to_move() == WHITE ? whiteSe : -whiteSe;
 
     // Normalize the raw evaluations to [-1024, 1024] to measure their correlation.
     int se_norm   = (se * 1024) / (std::abs(se) + 1024);
@@ -72,7 +72,7 @@ Value scale_evaluation(Value nnue, int optimism, const Position& pos) {
     int v = nnue + (nnue + optimism) * correl / 65536;
 
     // Scale the combined evaluation by total material
-    int material = 521 * pos.count<PAWN>() + pos.non_pawn_material();
+    int material = 521 * (wp + bp) + wnpm + bnpm;
     v += i64(material) * v / 90649;
 
     // Damp down the evaluation linearly when shuffling
