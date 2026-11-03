@@ -122,15 +122,71 @@ class SqrClippedReLU {
             const __m256i sqrPacked = _mm256_packs_epi16(sqr0, sqr1);
             _mm256_store_si256(&sqrOut[i], sqrPacked);
 
-            const __m256i clip0 =
-              _mm256_srli_epi16(_mm256_max_epi16(words0, zero), WeightScaleBitsLocal);
-            const __m256i clip1 =
-              _mm256_srli_epi16(_mm256_max_epi16(words1, zero), WeightScaleBitsLocal);
-            const __m256i clipPacked = _mm256_packs_epi16(clip0, clip1);
+            const __m256i clip0      = _mm256_srai_epi16(words0, WeightScaleBitsLocal);
+            const __m256i clip1      = _mm256_srai_epi16(words1, WeightScaleBitsLocal);
+            const __m256i clipPacked = _mm256_max_epi8(_mm256_packs_epi16(clip0, clip1), zero);
             _mm256_store_si256(&clipOut[i], clipPacked);
         }
+
+    #elif defined(USE_SSE2)
+        constexpr IndexType NumChunks16 = InputDimensions / 16;
+        const auto          in          = reinterpret_cast<const __m128i*>(input);
+        auto                sqrOut      = reinterpret_cast<__m128i*>(squared);
+        auto                clipOut     = reinterpret_cast<__m128i*>(clipped);
+        #if defined(USE_SSE41)
+        const __m128i zero = _mm_setzero_si128();
+        #else
+        const __m128i k0x80s = _mm_set1_epi8(-128);
+        #endif
+
+        for (IndexType i = 0; i < NumChunks16; ++i)
+        {
+            const __m128i words0 =
+              _mm_packs_epi32(_mm_load_si128(&in[i * 4 + 0]), _mm_load_si128(&in[i * 4 + 1]));
+            const __m128i words1 =
+              _mm_packs_epi32(_mm_load_si128(&in[i * 4 + 2]), _mm_load_si128(&in[i * 4 + 3]));
+
+            const __m128i sqr0 =
+              _mm_srli_epi16(_mm_mulhi_epi16(words0, words0), SimdShiftAmount);
+            const __m128i sqr1 =
+              _mm_srli_epi16(_mm_mulhi_epi16(words1, words1), SimdShiftAmount);
+            _mm_store_si128(&sqrOut[i], _mm_packs_epi16(sqr0, sqr1));
+
+            const __m128i clip = _mm_packs_epi16(_mm_srai_epi16(words0, WeightScaleBitsLocal),
+                                                 _mm_srai_epi16(words1, WeightScaleBitsLocal));
+        #if defined(USE_SSE41)
+            _mm_store_si128(&clipOut[i], _mm_max_epu8(clip, zero));
+        #else
+            _mm_store_si128(&clipOut[i], _mm_subs_epu8(clip, _mm_and_si128(clip, k0x80s)));
+        #endif
+        }
+
+    #elif defined(USE_NEON)
+        constexpr IndexType NumChunks16 = InputDimensions / 16;
+        const auto          in          = reinterpret_cast<const int32x4_t*>(input);
+        auto                sqrOut      = reinterpret_cast<int8x16_t*>(squared);
+        auto                clipOut     = reinterpret_cast<int8x16_t*>(clipped);
+        const int8x16_t     zero        = {0};
+
+        for (IndexType i = 0; i < NumChunks16; ++i)
+        {
+            const int16x8_t words0 =
+              vcombine_s16(vqmovn_s32(in[i * 4 + 0]), vqmovn_s32(in[i * 4 + 1]));
+            const int16x8_t words1 =
+              vcombine_s16(vqmovn_s32(in[i * 4 + 2]), vqmovn_s32(in[i * 4 + 3]));
+
+            const int16x8_t sqr0 =
+              vshrq_n_s16(vqdmulhq_s16(words0, words0), SimdShiftAmount + 1);
+            const int16x8_t sqr1 =
+              vshrq_n_s16(vqdmulhq_s16(words1, words1), SimdShiftAmount + 1);
+            sqrOut[i] = vcombine_s8(vqmovn_s16(sqr0), vqmovn_s16(sqr1));
+
+            const int8x16_t clip = vcombine_s8(vqshrn_n_s16(words0, WeightScaleBitsLocal),
+                                               vqshrn_n_s16(words1, WeightScaleBitsLocal));
+            clipOut[i]           = vmaxq_s8(clip, zero);
+        }
     #else
-        #error "propagate_pair() requires AVX2 or AVX512"
+        #error "propagate_pair() requires AVX512, AVX2, SSE2, or NEON"
     #endif
     }
 #endif

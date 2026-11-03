@@ -57,20 +57,18 @@ void update_accumulator_refresh_cache(Color                     perspective,
                                       const FeatureTransformer& featureTransformer,
                                       const Position&           pos,
                                       AccumulatorState&         accumulatorState,
-                                      AccumulatorCaches&        cache);
+                                      AccumulatorCaches&        cache,
+                                      int                       psqBlock);
 
 void update_accumulator_hybrid(Color                     perspective,
                                const Position&           pos,
                                const FeatureTransformer& featureTransformer,
                                AccumulatorState&         target,
                                const AccumulatorState&   computed,
-                               AccumulatorCaches&        cache);
+                               AccumulatorCaches&        cache,
+                               int                       psqBlock);
 
 }
-
-const AccumulatorState& AccumulatorStack::latest() const noexcept { return accumulators[size - 1]; }
-
-AccumulatorState& AccumulatorStack::mut_latest() noexcept { return accumulators[size - 1]; }
 
 void AccumulatorStack::reset() noexcept {
     accumulators[0].dirtyPiece = {};
@@ -100,15 +98,19 @@ void AccumulatorStack::evaluate(const Position&           pos,
                                 const FeatureTransformer& featureTransformer,
                                 // Silence spurious warning on GCC 10
                                 [[maybe_unused]] AccumulatorCaches& cache) noexcept {
-    const usize last_white = find_last_usable_accumulator(WHITE, pos);
-    const usize last_black = find_last_usable_accumulator(BLACK, pos);
+    const auto  after      = PSQFeatureSet::block_state(pos);
+    const int   whiteBlock = PSQFeatureSet::block(after, WHITE);
+    const int   blackBlock = PSQFeatureSet::block(after, BLACK);
+    const usize last_white = find_last_usable_accumulator(WHITE, after);
+    const usize last_black = find_last_usable_accumulator(BLACK, after);
 
     if (accumulators[last_white].computed[WHITE] && accumulators[last_black].computed[BLACK])
-        forward_update_incremental_both(pos, featureTransformer, last_white, last_black);
+        forward_update_incremental_both(pos, featureTransformer, last_white, last_black, whiteBlock,
+                                        blackBlock);
     else
     {
-        evaluate_side(WHITE, pos, featureTransformer, cache, last_white);
-        evaluate_side(BLACK, pos, featureTransformer, cache, last_black);
+        evaluate_side(WHITE, pos, featureTransformer, cache, last_white, whiteBlock);
+        evaluate_side(BLACK, pos, featureTransformer, cache, last_black, blackBlock);
     }
 }
 
@@ -116,44 +118,46 @@ void AccumulatorStack::evaluate_side(Color                     perspective,
                                      const Position&           pos,
                                      const FeatureTransformer& featureTransformer,
                                      AccumulatorCaches&        cache,
-                                     usize                     last_usable_accum) noexcept {
+                                     usize                     last_usable_accum,
+                                     int                       psqBlock) noexcept {
 
     constexpr int MIN_PC_COUNT_HYBRID = 15;
 
     if (accumulators[last_usable_accum].computed[perspective])
-        forward_update_incremental(perspective, pos, featureTransformer, last_usable_accum);
+        forward_update_incremental(perspective, pos, featureTransformer, last_usable_accum,
+                                   psqBlock);
 
     else
     {
         const auto& dirtyPiece = latest().dirtyPiece;
-        const auto  after      = PSQFeatureSet::block_state(pos);
         const auto& before     = latest().blockBefore;
 
         if (dirtyPiece.pc == make_piece(perspective, KING)
-            && PSQFeatureSet::block(before, perspective) == PSQFeatureSet::block(after, perspective)
+            && PSQFeatureSet::block(before, perspective) == psqBlock
             && accumulators[size - 2].computed[perspective]
             && pos.count<ALL_PIECES>() >= MIN_PC_COUNT_HYBRID
             && ((int(dirtyPiece.from) & 0b100) == (int(dirtyPiece.to) & 0b100))
             && dirtyPiece.add_sq == SQ_NONE)  // excludes castling
         {
             update_accumulator_hybrid(perspective, pos, featureTransformer, mut_latest(),
-                                      accumulators[size - 2], cache);
+                                      accumulators[size - 2], cache, psqBlock);
             return;
         }
 
-        update_accumulator_refresh_cache(perspective, featureTransformer, pos, mut_latest(), cache);
-        backward_update_incremental(perspective, pos, featureTransformer, last_usable_accum);
+        update_accumulator_refresh_cache(perspective, featureTransformer, pos, mut_latest(), cache,
+                                         psqBlock);
+        backward_update_incremental(perspective, pos, featureTransformer, last_usable_accum,
+                                    psqBlock);
     }
 }
 
 // Find the earliest usable accumulator, this can either be a computed accumulator or the accumulator
 // state just before a change that requires full refresh.
-usize AccumulatorStack::find_last_usable_accumulator(Color           perspective,
-                                                     const Position& pos) const noexcept {
+usize
+AccumulatorStack::find_last_usable_accumulator(Color                            perspective,
+                                               const PSQFeatureSet::BlockState& after) const noexcept {
 
     // Backtrack psq block changes
-    auto after = PSQFeatureSet::block_state(pos);
-
     for (usize curr_idx = size - 1; curr_idx > 0; curr_idx--)
     {
         if (accumulators[curr_idx].computed[perspective])
@@ -166,8 +170,6 @@ usize AccumulatorStack::find_last_usable_accumulator(Color           perspective
         // a subset of halfka refreshes
         if (PSQFeatureSet::requires_refresh(dirtyPiece, perspective, before, after))
             return curr_idx;
-
-        after = before;
     }
 
     return 0;
@@ -176,13 +178,13 @@ usize AccumulatorStack::find_last_usable_accumulator(Color           perspective
 void AccumulatorStack::forward_update_incremental(Color                     perspective,
                                                   const Position&           pos,
                                                   const FeatureTransformer& featureTransformer,
-                                                  const usize               begin) noexcept {
+                                                  const usize               begin,
+                                                  int                       psqBlock) noexcept {
 
     assert(begin < accumulators.size());
     assert(accumulators[begin].computed[perspective]);
 
-    const Square ksq      = pos.square<KING>(perspective);
-    const int    psqBlock = PSQFeatureSet::block(pos, perspective);
+    const Square ksq = pos.square<KING>(perspective);
 
     for (usize next = begin + 1; next < size; next++)
         update_accumulator_incremental<true>(perspective, featureTransformer, ksq, psqBlock,
@@ -194,14 +196,17 @@ void AccumulatorStack::forward_update_incremental(Color                     pers
 void AccumulatorStack::backward_update_incremental(Color                     perspective,
                                                    const Position&           pos,
                                                    const FeatureTransformer& featureTransformer,
-                                                   const usize               end) noexcept {
+                                                   const usize               end,
+                                                   int                       psqBlock) noexcept {
 
     assert(end < accumulators.size());
     assert(end < size);
     assert(latest().computed[perspective]);
 
-    const Square ksq      = pos.square<KING>(perspective);
-    const int    psqBlock = PSQFeatureSet::block(pos, perspective);
+    if (end == size - 1)
+        return;
+
+    const Square ksq = pos.square<KING>(perspective);
 
     for (i64 next = i64(size) - 2; next >= i64(end); next--)
         update_accumulator_incremental<false>(perspective, featureTransformer, ksq, psqBlock,
@@ -213,7 +218,9 @@ void AccumulatorStack::backward_update_incremental(Color                     per
 void AccumulatorStack::forward_update_incremental_both(const Position&           pos,
                                                        const FeatureTransformer& featureTransformer,
                                                        usize                     white_begin,
-                                                       usize black_begin) noexcept {
+                                                       usize                     black_begin,
+                                                       int                       whiteBlock,
+                                                       int                       blackBlock) noexcept {
 
     assert(white_begin < size);
     assert(black_begin < size);
@@ -222,8 +229,6 @@ void AccumulatorStack::forward_update_incremental_both(const Position&          
 
     const Square white_ksq    = pos.square<KING>(WHITE);
     const Square black_ksq    = pos.square<KING>(BLACK);
-    const int    whiteBlock   = PSQFeatureSet::block(pos, WHITE);
-    const int    blackBlock   = PSQFeatureSet::block(pos, BLACK);
     const usize  shared_begin = std::max(white_begin, black_begin);
 
     // Catch up the lagging perspective, then traverse the common suffix once.
@@ -530,31 +535,91 @@ sf_always_inline Tile apply_combined_features(IndexType                         
     return apply_features<sign>(j, acc, thr.begin() + thrBegin, thr.ssize() - thrBegin, thrWeights);
 }
 
-void apply_combined(Color                              perspective,
-                    const FeatureTransformer&          featureTransformer,
-                    const AccumulatorState&            from,
-                    AccumulatorState&                  to,
+void apply_combined(const i16* RESTRICT                fromAcc,
+                    i16* RESTRICT                      toAcc,
+                    const WeightType* RESTRICT         thrBase,
+                    const WeightType* RESTRICT         psqWeights,
                     const PSQFeatureSet::IndexList&    psqAdded,
                     const PSQFeatureSet::IndexList&    psqRemoved,
                     const ThreatFeatureSet::IndexList& thrAdded,
-                    const ThreatFeatureSet::IndexList& thrRemoved,
-                    const WeightType*                  psqWeights) {
+                    const ThreatFeatureSet::IndexList& thrRemoved) {
 
-    const auto& fromAcc = from.accumulation[perspective];
-    auto&       toAcc   = to.accumulation[perspective];
+    assert(psqRemoved.size() == 1 || psqRemoved.size() == 2);
+    assert(psqAdded.size() == 1 || psqAdded.size() == 2);
+
+    const WeightType* const rem0    = &psqWeights[usize(psqRemoved[0]) * Dimensions];
+    const u16*              thrRem  = thrRemoved.begin();
+    int                     thrRemN = thrRemoved.ssize();
+#if defined(USE_PAIRED_WIDENING_ADD)
+    const WeightType*       rem1    = nullptr;
+    if (psqRemoved.size() == 2)
+        rem1 = &psqWeights[usize(psqRemoved[1]) * Dimensions];
+    else if (thrRemN > 0)
+    {
+        rem1 = &thrBase[usize(thrRem[0]) * Dimensions];
+        ++thrRem;
+        --thrRemN;
+    }
+#else
+    const bool              hasRem1 = psqRemoved.size() == 2;
+    const WeightType* const rem1    = &psqWeights[usize(psqRemoved[1]) * Dimensions];
+#endif
+
+    const WeightType* const add0    = &psqWeights[usize(psqAdded[0]) * Dimensions];
+    const u16*              thrAdd  = thrAdded.begin();
+    int                     thrAddN = thrAdded.ssize();
+#if defined(USE_PAIRED_WIDENING_ADD)
+    const WeightType*       add1    = nullptr;
+    if (psqAdded.size() == 2)
+        add1 = &psqWeights[usize(psqAdded[1]) * Dimensions];
+    else if (thrAddN > 0)
+    {
+        add1 = &thrBase[usize(thrAdd[0]) * Dimensions];
+        ++thrAdd;
+        --thrAddN;
+    }
+#else
+    const bool              hasAdd1 = psqAdded.size() == 2;
+    const WeightType* const add1    = &psqWeights[usize(psqAdded[1]) * Dimensions];
+#endif
 
     Tile acc;
 
     for (IndexType j = 0; j < Dimensions; increment_index(j))
     {
-        acc = load_tile(j, fromAcc.data());
+#ifdef USE_RVV
+        acc = load_tile(j, fromAcc);
+#else
+        acc = load_tile(0, fromAcc);
+        fromAcc += Tiling::TileHeight;
+#endif
 
-        acc = apply_combined_features<-1, true>(j, acc, psqRemoved, thrRemoved, featureTransformer,
-                                                psqWeights);
-        acc = apply_combined_features<+1, true>(j, acc, psqAdded, thrAdded, featureTransformer,
-                                                psqWeights);
+#if defined(USE_PAIRED_WIDENING_ADD)
+        acc = rem1 ? apply_feature_pair<-1>(acc, &rem0[j], &rem1[j])
+                   : apply_feature_single<-1>(j, acc, &rem0[j]);
+#else
+        acc = apply_feature_single<-1>(j, acc, &rem0[j]);
+        if (hasRem1)
+            acc = apply_feature_single<-1>(j, acc, &rem1[j]);
+#endif
+        acc = apply_features<-1>(j, acc, thrRem, thrRemN, &thrBase[j]);
 
-        store_tile(j, toAcc.data(), acc);
+#if defined(USE_PAIRED_WIDENING_ADD)
+        acc = add1 ? apply_feature_pair<+1>(acc, &add0[j], &add1[j])
+                   : apply_feature_single<+1>(j, acc, &add0[j]);
+#else
+        acc = apply_feature_single<+1>(j, acc, &add0[j]);
+        if (hasAdd1)
+            acc = apply_feature_single<+1>(j, acc, &add1[j]);
+#endif
+        acc = apply_features<+1>(j, acc, thrAdd, thrAddN, &thrBase[j]);
+
+#ifdef USE_RVV
+        store_tile(j, toAcc, acc);
+#else
+        store_tile(0, toAcc, acc);
+        toAcc += Tiling::TileHeight;
+#endif
     }
 }
 
@@ -582,27 +647,28 @@ void update_accumulator_incremental(Color                     perspective,
 
     // Used solely for prefetching
     const auto* threatPpBase = &featureTransformer.threatAndPpWeights[0];
-    IndexType   pfStride     = FeatureTransformer::OutputDimensions;
 
     if constexpr (Forward)
     {
         ThreatFeatureSet::append_changed_indices(perspective, ksq, dirtyThreats, thrRemoved,
-                                                 thrAdded, threatPpBase, pfStride);
+                                                 thrAdded, threatPpBase);
         PairFeatureSet::append_changed_indices(perspective, ksq, dirtyPawnPairs, thrRemoved,
-                                               thrAdded, threatPpBase, pfStride);
+                                               thrAdded, threatPpBase);
         PSQFeatureSet::append_changed_indices(perspective, ksq, dirtyPiece, psqRemoved, psqAdded);
     }
     else
     {
         ThreatFeatureSet::append_changed_indices(perspective, ksq, dirtyThreats, thrAdded,
-                                                 thrRemoved, threatPpBase, pfStride);
+                                                 thrRemoved, threatPpBase);
         PairFeatureSet::append_changed_indices(perspective, ksq, dirtyPawnPairs, thrAdded,
-                                               thrRemoved, threatPpBase, pfStride);
+                                               thrRemoved, threatPpBase);
         PSQFeatureSet::append_changed_indices(perspective, ksq, dirtyPiece, psqAdded, psqRemoved);
     }
 
-    apply_combined(perspective, featureTransformer, computed, target_state, psqAdded, psqRemoved,
-                   thrAdded, thrRemoved, featureTransformer.psq_weights(psqBlock));
+    apply_combined(computed.accumulation[perspective].data(),
+                   target_state.accumulation[perspective].data(), threatPpBase,
+                   featureTransformer.psq_weights(psqBlock), psqAdded, psqRemoved, thrAdded,
+                   thrRemoved);
 
     target_state.computed[perspective] = true;
 }
@@ -624,25 +690,26 @@ void update_accumulator_incremental_both(const FeatureTransformer& featureTransf
     ThreatFeatureSet::IndexList thr_removed[COLOR_NB], thr_added[COLOR_NB];
 
     const auto* threat_pp_base = &featureTransformer.threatAndPpWeights[0];
-    const auto  pf_stride      = FeatureTransformer::OutputDimensions;
 
-    ThreatFeatureSet::append_changed_indices_both(
-      white_ksq, black_ksq, target_state.dirtyThreats, thr_removed[WHITE], thr_added[WHITE],
-      thr_removed[BLACK], thr_added[BLACK], threat_pp_base, pf_stride);
-    PairFeatureSet::append_changed_indices_both(
-      white_ksq, black_ksq, target_state.dirtyPawnPairs, thr_removed[WHITE], thr_added[WHITE],
-      thr_removed[BLACK], thr_added[BLACK], threat_pp_base, pf_stride);
+    ThreatFeatureSet::append_changed_indices_both(white_ksq, black_ksq, target_state.dirtyThreats,
+                                                  thr_removed[WHITE], thr_added[WHITE],
+                                                  thr_removed[BLACK], thr_added[BLACK],
+                                                  threat_pp_base);
+    PairFeatureSet::append_changed_indices_both(white_ksq, black_ksq, target_state.dirtyPawnPairs,
+                                                thr_removed[WHITE], thr_added[WHITE],
+                                                thr_removed[BLACK], thr_added[BLACK],
+                                                threat_pp_base);
     PSQFeatureSet::append_changed_indices(WHITE, white_ksq, target_state.dirtyPiece,
                                           psq_removed[WHITE], psq_added[WHITE]);
     PSQFeatureSet::append_changed_indices(BLACK, black_ksq, target_state.dirtyPiece,
                                           psq_removed[BLACK], psq_added[BLACK]);
 
-    apply_combined(WHITE, featureTransformer, computed, target_state, psq_added[WHITE],
-                   psq_removed[WHITE], thr_added[WHITE], thr_removed[WHITE],
-                   featureTransformer.psq_weights(whiteBlock));
-    apply_combined(BLACK, featureTransformer, computed, target_state, psq_added[BLACK],
-                   psq_removed[BLACK], thr_added[BLACK], thr_removed[BLACK],
-                   featureTransformer.psq_weights(blackBlock));
+    apply_combined(computed.accumulation[WHITE].data(), target_state.accumulation[WHITE].data(),
+                   threat_pp_base, featureTransformer.psq_weights(whiteBlock), psq_added[WHITE],
+                   psq_removed[WHITE], thr_added[WHITE], thr_removed[WHITE]);
+    apply_combined(computed.accumulation[BLACK].data(), target_state.accumulation[BLACK].data(),
+                   threat_pp_base, featureTransformer.psq_weights(blackBlock), psq_added[BLACK],
+                   psq_removed[BLACK], thr_added[BLACK], thr_removed[BLACK]);
 
     target_state.computed[WHITE] = true;
     target_state.computed[BLACK] = true;
@@ -792,7 +859,8 @@ void update_accumulator_hybrid(Color                     perspective,
                                const FeatureTransformer& featureTransformer,
                                AccumulatorState&         target,
                                const AccumulatorState&   computed,
-                               AccumulatorCaches&        cache) {
+                               AccumulatorCaches&        cache,
+                               int                       psqBlock) {
     const auto& dirtyPiece = target.dirtyPiece;
 
     assert(dirtyPiece.pc == make_piece(perspective, KING));
@@ -827,7 +895,6 @@ void update_accumulator_hybrid(Color                     perspective,
     previousPieces[oldKsq] = make_piece(perspective, KING);
     previousPieceBB |= square_bb(oldKsq);
 
-    const int   psqBlock   = PSQFeatureSet::block(pos, perspective);
     const auto& oldEntry   = cache[psqBlock][oldKsq][perspective];
     auto&       newEntry   = cache[psqBlock][newKsq][perspective];
     const auto* psqWeights = featureTransformer.psq_weights(psqBlock);
@@ -843,11 +910,10 @@ void update_accumulator_hybrid(Color                     perspective,
 
     ThreatFeatureSet::IndexList thrRemoved, thrAdded;  // also contain pp indices
     const auto*                 threatPpBase = &featureTransformer.threatAndPpWeights[0];
-    IndexType                   pfStride     = FeatureTransformer::OutputDimensions;
     ThreatFeatureSet::append_changed_indices(perspective, newKsq, target.dirtyThreats, thrRemoved,
-                                             thrAdded, threatPpBase, pfStride);
+                                             thrAdded, threatPpBase);
     PairFeatureSet::append_changed_indices(perspective, newKsq, target.dirtyPawnPairs, thrRemoved,
-                                           thrAdded, threatPpBase, pfStride);
+                                           thrAdded, threatPpBase);
 
     const auto& fromAcc = computed.accumulation[perspective];
     auto&       toAcc   = target.accumulation[perspective];
@@ -892,9 +958,9 @@ void update_accumulator_refresh_cache(Color                     perspective,
                                       const FeatureTransformer& featureTransformer,
                                       const Position&           pos,
                                       AccumulatorState&         accumulator,
-                                      AccumulatorCaches&        cache) {
+                                      AccumulatorCaches&        cache,
+                                      int                       psqBlock) {
 
-    const int                psqBlock   = PSQFeatureSet::block(pos, perspective);
     const Square             ksq        = pos.square<KING>(perspective);
     auto&                    entry      = cache[psqBlock][ksq][perspective];
     const auto*              psqWeights = featureTransformer.psq_weights(psqBlock);

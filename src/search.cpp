@@ -100,13 +100,17 @@ int correction_value(const Worker& w, const Position& pos, const Stack* const ss
     const int   micv   = shared.minor_piece_correction_entry(pos)[us].minor;
     const int   wnpcv  = shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite;
     const int   bnpcv  = shared.nonpawn_correction_entry<BLACK>(pos)[us].nonPawnBlack;
-    const int   cntcv =
-      m.is_ok()
-          ? 7885
-              * ((*(ss - 2)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
-                 + (*(ss - 4)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()])
-            + 6307 * (*(ss - 6)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
-          : 80695;
+
+    int cntcv = 80695;
+    if (m.is_ok())
+    {
+        const Square to = m.to_sq();
+        const Piece  pc = pos.piece_on(to);
+        cntcv           = 7885
+                * ((*(ss - 2)->continuationCorrectionHistory)[pc][to]
+                   + (*(ss - 4)->continuationCorrectionHistory)[pc][to])
+              + 6307 * (*(ss - 6)->continuationCorrectionHistory)[pc][to];
+    }
 
     return 13806 * pcv + 9512 * micv + 11615 * (wnpcv + bnpcv) + cntcv;
 }
@@ -162,10 +166,8 @@ void update_all_stats(const Position& pos,
 
 // Detect shuffling moves in order to limit search explosions. This code was
 // added in #6447 as non-regression, and so its parameters should not be tuned.
-bool is_shuffling(Move move, Stack* const ss, const Position& pos) {
-    if (pos.capture_stage(move) || pos.rule50_count() < 10)
-        return false;
-    if (pos.state()->pliesFromNull < 6 || ss->ply < 20)
+sf_always_inline bool is_shuffling(Move move, Stack* const ss, const Position& pos) {
+    if (ss->ply < 20 || pos.rule50_count() < 10 || pos.state()->pliesFromNull < 6)
         return false;
     return move.from_sq() == (ss - 2)->currentMove.to_sq()
         && (ss - 2)->currentMove.from_sq() == (ss - 4)->currentMove.to_sq();
@@ -191,17 +193,19 @@ Search::Worker::Worker(SharedState&                   sharedState,
     threads(sharedState.threads),
     tt(sharedState.tt),
     network(sharedState.network),
-    refreshTable(network[token]) {
+    networkPtr(&network[token]),
+    refreshTable(*networkPtr) {
     clear();
 }
 
 void Search::Worker::ensure_network_replicated() {
     // Access once to force lazy initialization, avoiding initialization during search
-    (void) (network[numaAccessToken]);
+    networkPtr = &network[numaAccessToken];
 }
 
 void Search::Worker::start_searching() {
 
+    networkPtr = &network[numaAccessToken];
     accumulatorStack.reset();
 
     // Non-main threads go directly to iterative_deepening()
@@ -733,7 +737,8 @@ void Search::Worker::clear() {
         for (auto& h : to)
             h.fill(5);
 
-    refreshTable.clear(network[numaAccessToken]);
+    networkPtr = &network[numaAccessToken];
+    refreshTable.clear(*networkPtr);
 }
 
 
@@ -830,8 +835,6 @@ Value Search::Worker::search(
     (ss + 2)->cutoffCnt        = 0;
     (ss + 1)->priorNMPFailHigh = 0;
 
-    const auto correctionValue = correction_value(*this, pos, ss);
-
     // Step 4. Transposition table lookup
     excludedMove                   = ss->excludedMove;
     posKey                         = pos.key();
@@ -842,6 +845,8 @@ Value Search::Worker::search(
     ttData.value = ttHit ? value_from_tt(ttData.value, ss->ply, pos.rule50_count()) : VALUE_NONE;
     ss->ttPv     = excludedMove ? ss->ttPv : PvNode || (ttHit && ttData.is_pv);
     ttCapture    = ttData.move && pos.capture_stage(ttData.move);
+
+    const auto correctionValue = correction_value(*this, pos, ss);
 
     // Step 5. Static evaluation of the position
     Value unadjustedStaticEval = VALUE_NONE;
@@ -1276,7 +1281,7 @@ moves_loop:  // When in check, search starts here
         // and lower extension margins scale well.
         if (!rootNode && move == ttData.move && !excludedMove && depth >= 6 + ss->ttPv
             && is_valid(ttData.value) && !is_decisive(ttData.value) && (ttData.bound & BOUND_LOWER)
-            && ttData.depth >= depth - 3 && !is_shuffling(move, ss, pos) && !seekMate)
+            && ttData.depth >= depth - 3 && !seekMate && (capture || !is_shuffling(move, ss, pos)))
         {
             Value singularBeta  = ttData.value - (59 + 66 * (ss->ttPv && !PvNode)) * depth / 63;
             Depth singularDepth = newDepth / 2;
@@ -1624,15 +1629,15 @@ moves_loop:  // When in check, search starts here
 
         // scaledBonus ranges from 0 to roughly 2.3M, overflows happen for
         // multipliers larger than 900
-        const int scaledBonus = std::min(150 * depth - 85, 1337) * bonusScale;
+        const int   scaledBonus = std::min(150 * depth - 85, 1337) * bonusScale;
+        const Piece prevPc      = pos.piece_on(prevSq);
 
-        update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq,
-                                      scaledBonus * 263 / 16384);
+        update_continuation_histories(ss - 1, prevPc, prevSq, scaledBonus * 263 / 16384);
 
         mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 215 / 32768;
 
-        if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
-            sharedHistory.pawn_entry(pos)[pos.piece_on(prevSq)][prevSq] << scaledBonus * 324 / 8192;
+        if (type_of(prevPc) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
+            sharedHistory.pawn_entry(pos)[prevPc][prevSq] << scaledBonus * 324 / 8192;
     }
 
     // Bonus for prior capture countermove that caused the fail low
@@ -1719,17 +1724,13 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
         ss->pv->clear();
     }
 
-    bestMove    = Move::none();
-    ss->inCheck = pos.checkers();
-    moveCount   = 0;
-
     // Used to send selDepth info to GUI (selDepth counts from 1, ply from 0)
     if (PvNode && selDepth < ss->ply + 1)
         selDepth = ss->ply + 1;
 
     // Step 2. Check for an immediate draw or maximum ply reached
     if (pos.is_draw(ss->ply) || ss->ply >= MAX_PLY)
-        return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : VALUE_DRAW;
+        return (ss->ply >= MAX_PLY && !pos.checkers()) ? evaluate(pos) : VALUE_DRAW;
 
     assert(0 <= ss->ply && ss->ply < MAX_PLY);
 
@@ -1738,14 +1739,14 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     auto [ttHit, ttData, ttWriter] = tt.probe(posKey);
 
     ss->ttHit    = ttHit;
-    ttData.move  = ttHit ? ttData.move : Move::none();
     ttData.value = ttHit ? value_from_tt(ttData.value, ss->ply, pos.rule50_count()) : VALUE_NONE;
-    pvHit        = ttHit && ttData.is_pv;
 
     // At non-PV nodes we check for an early TT cutoff
     if (!PvNode && ttData.depth >= DEPTH_QS && is_valid(ttData.value)
         && (ttData.bound & (ttData.value >= beta ? BOUND_LOWER : BOUND_UPPER)))
         return ttData.value;
+
+    ss->inCheck = pos.checkers();
 
     // Step 4. Static evaluation of the position
     Value unadjustedStaticEval = VALUE_NONE;
@@ -1796,15 +1797,17 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
         futilityBase = ss->staticEval + 306;
     }
 
-    const PieceToHistory* contHist[] = {(ss - 1)->continuationHistory};
+    bestMove    = Move::none();
+    moveCount   = 0;
+    ttData.move = ttHit ? ttData.move : Move::none();
+    pvHit       = ttHit && ttData.is_pv;
 
     Square prevSq = ((ss - 1)->currentMove).is_ok() ? ((ss - 1)->currentMove).to_sq() : SQ_NONE;
 
     // Initialize a MovePicker object for the current position, and prepare
     // to search the moves. We presently use two stages of move generator in
     // quiescence search: captures, or evasions only when in check.
-    MovePicker mp(pos, ttData.move, DEPTH_QS, &mainHistory, &lowPlyHistory, &captureHistory,
-                  contHist, &sharedHistory, ss->ply);
+    MovePicker mp(pos, ttData.move, &mainHistory, &captureHistory, &(ss - 1)->continuationHistory);
 
     // Step 5. Loop through all legal moves until no moves remain
     // or a beta cutoff occurs.
@@ -1812,46 +1815,55 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     {
         assert(move.is_ok());
 
-        givesCheck = pos.gives_check(move);
-        capture    = pos.capture_stage(move);
-
         moveCount++;
 
         // Step 6. Pruning
         if (!is_loss(bestValue))
         {
             // Futility pruning and moveCount pruning
-            if (!givesCheck && move.to_sq() != prevSq && !is_loss(futilityBase)
-                && move.type_of() != PROMOTION)
+            if (!ss->inCheck && move.to_sq() != prevSq && move.type_of() != PROMOTION)
             {
-                if (moveCount > 2)
-                    continue;
-
-                Value futilityValue = futilityBase + PieceValue[pos.piece_on(move.to_sq())];
-
-                // If static eval + value of piece we are going to capture is
-                // much lower than alpha, we can prune this move.
-                if (futilityValue <= alpha)
+                givesCheck = pos.gives_check(move);
+                if (!givesCheck)
                 {
-                    bestValue = std::max(bestValue, futilityValue);
-                    continue;
+                    if (moveCount > 2)
+                        continue;
+
+                    Value futilityValue = futilityBase + PieceValue[pos.piece_on(move.to_sq())];
+
+                    // If static eval + value of piece we are going to capture is
+                    // much lower than alpha, we can prune this move.
+                    if (futilityValue <= alpha)
+                    {
+                        bestValue = std::max(bestValue, futilityValue);
+                        continue;
+                    }
+
+                    // If static exchange evaluation is low enough, we can prune
+                    if (!pos.see_ge(move, alpha - futilityBase))
+                    {
+                        bestValue = std::max(bestValue, std::min(alpha, futilityBase));
+                        continue;
+                    }
                 }
 
-                // If static exchange evaluation is low enough, we can prune
-                if (!pos.see_ge(move, alpha - futilityBase))
-                {
-                    bestValue = std::max(bestValue, std::min(alpha, futilityBase));
+                capture = pos.capture_stage(move);
+                if (!capture || !pos.see_ge(move, -74))
                     continue;
-                }
             }
+            else
+            {
+                capture = pos.capture_stage(move);
+                if (!capture || !pos.see_ge(move, -74))
+                    continue;
 
-            // Skip non-captures
-            if (!capture)
-                continue;
-
-            // Do not search moves with bad enough SEE values
-            if (!pos.see_ge(move, -74))
-                continue;
+                givesCheck = pos.gives_check(move);
+            }
+        }
+        else
+        {
+            capture    = pos.capture_stage(move);
+            givesCheck = pos.gives_check(move);
         }
 
         // Step 7. Make and search the move
@@ -1933,7 +1945,7 @@ TimePoint Search::Worker::elapsed() const {
 // Evaluate the current position of the game tree, from the point of view of
 // the side to move.
 Value Search::Worker::evaluate(const Position& pos) {
-    return Eval::evaluate(network[numaAccessToken], pos, accumulatorStack, refreshTable,
+    return Eval::evaluate(*networkPtr, pos, accumulatorStack, refreshTable,
                           optimism[pos.side_to_move()]);
 }
 
@@ -2079,16 +2091,19 @@ void update_continuation_histories(Stack* ss, Piece pc, Square to, int bonus) {
 void update_quiet_histories(
   const Position& pos, Stack* ss, Search::Worker& workerThread, Move move, int bonus) {
 
-    Color us = pos.side_to_move();
+    const Color  us = pos.side_to_move();
+    const Piece  pc = pos.moved_piece(move);
+    const Square to = move.to_sq();
+
     workerThread.mainHistory[us][move.raw()] << bonus;  // Untuned to prevent duplicate effort
 
     if (ss->ply < LOW_PLY_HISTORY_SIZE)
         workerThread.lowPlyHistory[ss->ply][move.raw()] << bonus * 712 / 1024;
 
-    update_continuation_histories(ss, pos.moved_piece(move), move.to_sq(), bonus * 750 / 1024);
-
-    workerThread.sharedHistory.pawn_entry(pos)[pos.moved_piece(move)][move.to_sq()]
+    workerThread.sharedHistory.pawn_entry(pos)[pc][to]
       << bonus * (bonus > -4 ? 1104 : 459) / 1024;
+
+    update_continuation_histories(ss, pc, to, bonus * 750 / 1024);
 }
 }
 

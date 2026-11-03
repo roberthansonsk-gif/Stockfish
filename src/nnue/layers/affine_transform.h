@@ -152,7 +152,7 @@ class AffineTransform {
     static constexpr IndexType get_weight_index_scrambled(IndexType i) {
         IndexType inputIndex = i % PaddedInputDimensions;
 
-#if defined(USE_PAIR_ACTIVATIONS) || defined(USE_LASX)
+#if defined(USE_AVX2) || defined(USE_LASX)
         // At load time, pre-permute the weights to match the per-128-bit-lane interleaving that
         // the previous layer produces, either via SqrClippedReLU::propagate_pair() or via the
         // separate SqrClippedReLU/ClippedReLU propagate() calls, so no shuffle is needed at runtime.
@@ -270,7 +270,47 @@ class AffineTransform {
                 acc[k] = vec_set_32(0);
 
             IndexType i = 0;
-    #if defined(USE_VNNI) || defined(USE_NEON_DOTPROD)
+    #if defined(USE_NEON_DOTPROD)
+            const auto* inVec = reinterpret_cast<const int8x16_t*>(input);
+            for (; i + 3 < NumChunks; i += 4)
+            {
+                const int8x16_t in0123 = inVec[i / 4];
+                const auto      col0 =
+                  reinterpret_cast<const int8x16_t*>(&weights[(i + 0) * OutputDimensions * 4]);
+                const auto col1 =
+                  reinterpret_cast<const int8x16_t*>(&weights[(i + 1) * OutputDimensions * 4]);
+                const auto col2 =
+                  reinterpret_cast<const int8x16_t*>(&weights[(i + 2) * OutputDimensions * 4]);
+                const auto col3 =
+                  reinterpret_cast<const int8x16_t*>(&weights[(i + 3) * OutputDimensions * 4]);
+
+                for (IndexType k = 0; k < NumAccums; ++k)
+                {
+                    acc[k]             = vdotq_laneq_s32(acc[k], col0[k], in0123, 0);
+                    acc[k + NumAccums] = vdotq_laneq_s32(acc[k + NumAccums], col1[k], in0123, 1);
+                    acc[k]             = vdotq_laneq_s32(acc[k], col2[k], in0123, 2);
+                    acc[k + NumAccums] = vdotq_laneq_s32(acc[k + NumAccums], col3[k], in0123, 3);
+                }
+            }
+            for (; i + 1 < NumChunks; i += 2)
+            {
+                const vec_t in0 = vec_load_32(input + i * sizeof(i32));
+                const vec_t in1 = vec_load_32(input + (i + 1) * sizeof(i32));
+                const auto  col0 =
+                  reinterpret_cast<const vec_t*>(&weights[i * OutputDimensions * 4]);
+                const auto col1 =
+                  reinterpret_cast<const vec_t*>(&weights[(i + 1) * OutputDimensions * 4]);
+
+                for (IndexType k = 0; k < NumAccums; ++k)
+                {
+                    vec_add_dpbusd_32(acc[k], in0, col0[k]);
+                    vec_add_dpbusd_32(acc[k + NumAccums], in1, col1[k]);
+                }
+            }
+
+            for (IndexType k = 0; k < NumAccums; ++k)
+                acc[k] = vaddq_s32(acc[k], acc[k + NumAccums]);
+    #elif defined(USE_VNNI)
             for (; i < NumChunks; i += 2)
             {
                 const vec_t in0 = vec_load_32(input + i * sizeof(i32));
@@ -288,11 +328,7 @@ class AffineTransform {
             }
 
             for (IndexType k = 0; k < NumAccums; ++k)
-        #if defined(USE_NEON_DOTPROD)
-                acc[k] = vaddq_s32(acc[k], acc[k + NumAccums]);
-        #else
                 acc[k] = vec_add_32(acc[k], acc[k + NumAccums]);
-        #endif
     #endif
             for (; i < NumChunks; ++i)
             {

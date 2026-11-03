@@ -123,17 +123,13 @@ struct NNZInfo {
             using namespace SIMD;
 
         #ifdef USE_NEON
-            alignas(16) static constexpr u16 Mask8[8] = {1, 16, 2, 32, 4, 64, 8, 128};
+            alignas(16) static constexpr u16 Mask8[8] = {1, 2, 4, 8, 16, 32, 64, 128};
 
-            uint32x4_t n1 = vreinterpretq_u32_s16(neurons1);
-            uint32x4_t n2 = vreinterpretq_u32_s16(neurons2);
-
-            const uint32x4_t t1 = vtstq_u32(n1, n1);
-            const uint32x4_t t2 = vtstq_u32(n2, n2);
-
-            const uint16x8_t packed =
-              vtrn1q_u16(vreinterpretq_u16_u32(t1), vreinterpretq_u16_u32(t2));
-            const uint16x8_t bits = vandq_u16(packed, vld1q_u16(Mask8));
+            const uint16x8_t u1       = vreinterpretq_u16_s16(neurons1);
+            const uint16x8_t u2       = vreinterpretq_u16_s16(neurons2);
+            const uint16x8_t combined = vpmaxq_u16(u1, u2);
+            const uint16x8_t cmp      = vtstq_u16(combined, combined);
+            const uint16x8_t bits     = vandq_u16(cmp, vld1q_u16(Mask8));
 
             *out++ = vaddvq_u16(bits);
         #elif defined(__wasm__)

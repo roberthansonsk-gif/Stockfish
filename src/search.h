@@ -402,6 +402,7 @@ class Worker {
     ThreadPool&                                              threads;
     TranspositionTable&                                      tt;
     const LazyNumaReplicatedSystemWide<Eval::NNUE::Network>& network;
+    const Eval::NNUE::Network*                               networkPtr;
 
     // Used by NNUE
     Eval::NNUE::AccumulatorStack  accumulatorStack;

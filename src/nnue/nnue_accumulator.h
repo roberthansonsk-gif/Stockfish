@@ -97,7 +97,9 @@ class AccumulatorStack {
    public:
     static constexpr usize MaxSize = MAX_PLY + 1;
 
-    [[nodiscard]] const AccumulatorState& latest() const noexcept;
+    [[nodiscard]] const AccumulatorState& latest() const noexcept {
+        return accumulators[size - 1];
+    }
 
     void     reset() noexcept;
     Dirties& push(const Position& pos) noexcept;
@@ -109,32 +111,38 @@ class AccumulatorStack {
                   [[maybe_unused]] AccumulatorCaches& cache) noexcept;
 
    private:
-    [[nodiscard]] AccumulatorState& mut_latest() noexcept;
+    [[nodiscard]] AccumulatorState& mut_latest() noexcept { return accumulators[size - 1]; }
 
     void evaluate_side(Color                     perspective,
                        const Position&           pos,
                        const FeatureTransformer& featureTransformer,
                        // Silence spurious warning on GCC 10
                        [[maybe_unused]] AccumulatorCaches& cache,
-                       usize                               last_usable_accum) noexcept;
+                       usize                     last_usable_accum,
+                       int                       psqBlock) noexcept;
 
-    [[nodiscard]] usize find_last_usable_accumulator(Color           perspective,
-                                                     const Position& pos) const noexcept;
+    [[nodiscard]] usize
+    find_last_usable_accumulator(Color                            perspective,
+                                 const PSQFeatureSet::BlockState& after) const noexcept;
 
     void forward_update_incremental(Color                     perspective,
                                     const Position&           pos,
                                     const FeatureTransformer& featureTransformer,
-                                    const usize               begin) noexcept;
+                                    const usize               begin,
+                                    int                       psqBlock) noexcept;
 
     void backward_update_incremental(Color                     perspective,
                                      const Position&           pos,
                                      const FeatureTransformer& featureTransformer,
-                                     const usize               end) noexcept;
+                                     const usize               end,
+                                     int                       psqBlock) noexcept;
 
     void forward_update_incremental_both(const Position&           pos,
                                          const FeatureTransformer& featureTransformer,
                                          usize                     white_begin,
-                                         usize                     black_begin) noexcept;
+                                         usize                     black_begin,
+                                         int                       whiteBlock,
+                                         int                       blackBlock) noexcept;
 
     std::array<AccumulatorState, MaxSize> accumulators;
     usize                                 size = 1;
