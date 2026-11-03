@@ -582,22 +582,21 @@ void update_accumulator_incremental(Color                     perspective,
 
     // Used solely for prefetching
     const auto* threatPpBase = &featureTransformer.threatAndPpWeights[0];
-    IndexType   pfStride     = FeatureTransformer::OutputDimensions;
 
     if constexpr (Forward)
     {
         ThreatFeatureSet::append_changed_indices(perspective, ksq, dirtyThreats, thrRemoved,
-                                                 thrAdded, threatPpBase, pfStride);
+                                                 thrAdded, threatPpBase);
         PairFeatureSet::append_changed_indices(perspective, ksq, dirtyPawnPairs, thrRemoved,
-                                               thrAdded, threatPpBase, pfStride);
+                                               thrAdded, threatPpBase);
         PSQFeatureSet::append_changed_indices(perspective, ksq, dirtyPiece, psqRemoved, psqAdded);
     }
     else
     {
         ThreatFeatureSet::append_changed_indices(perspective, ksq, dirtyThreats, thrAdded,
-                                                 thrRemoved, threatPpBase, pfStride);
+                                                 thrRemoved, threatPpBase);
         PairFeatureSet::append_changed_indices(perspective, ksq, dirtyPawnPairs, thrAdded,
-                                               thrRemoved, threatPpBase, pfStride);
+                                               thrRemoved, threatPpBase);
         PSQFeatureSet::append_changed_indices(perspective, ksq, dirtyPiece, psqAdded, psqRemoved);
     }
 
@@ -624,14 +623,15 @@ void update_accumulator_incremental_both(const FeatureTransformer& featureTransf
     ThreatFeatureSet::IndexList thr_removed[COLOR_NB], thr_added[COLOR_NB];
 
     const auto* threat_pp_base = &featureTransformer.threatAndPpWeights[0];
-    const auto  pf_stride      = FeatureTransformer::OutputDimensions;
 
-    ThreatFeatureSet::append_changed_indices_both(
-      white_ksq, black_ksq, target_state.dirtyThreats, thr_removed[WHITE], thr_added[WHITE],
-      thr_removed[BLACK], thr_added[BLACK], threat_pp_base, pf_stride);
-    PairFeatureSet::append_changed_indices_both(
-      white_ksq, black_ksq, target_state.dirtyPawnPairs, thr_removed[WHITE], thr_added[WHITE],
-      thr_removed[BLACK], thr_added[BLACK], threat_pp_base, pf_stride);
+    ThreatFeatureSet::append_changed_indices_both(white_ksq, black_ksq, target_state.dirtyThreats,
+                                                  thr_removed[WHITE], thr_added[WHITE],
+                                                  thr_removed[BLACK], thr_added[BLACK],
+                                                  threat_pp_base);
+    PairFeatureSet::append_changed_indices_both(white_ksq, black_ksq, target_state.dirtyPawnPairs,
+                                                thr_removed[WHITE], thr_added[WHITE],
+                                                thr_removed[BLACK], thr_added[BLACK],
+                                                threat_pp_base);
     PSQFeatureSet::append_changed_indices(WHITE, white_ksq, target_state.dirtyPiece,
                                           psq_removed[WHITE], psq_added[WHITE]);
     PSQFeatureSet::append_changed_indices(BLACK, black_ksq, target_state.dirtyPiece,
@@ -843,11 +843,10 @@ void update_accumulator_hybrid(Color                     perspective,
 
     ThreatFeatureSet::IndexList thrRemoved, thrAdded;  // also contain pp indices
     const auto*                 threatPpBase = &featureTransformer.threatAndPpWeights[0];
-    IndexType                   pfStride     = FeatureTransformer::OutputDimensions;
     ThreatFeatureSet::append_changed_indices(perspective, newKsq, target.dirtyThreats, thrRemoved,
-                                             thrAdded, threatPpBase, pfStride);
+                                             thrAdded, threatPpBase);
     PairFeatureSet::append_changed_indices(perspective, newKsq, target.dirtyPawnPairs, thrRemoved,
-                                           thrAdded, threatPpBase, pfStride);
+                                           thrAdded, threatPpBase);
 
     const auto& fromAcc = computed.accumulation[perspective];
     auto&       toAcc   = target.accumulation[perspective];

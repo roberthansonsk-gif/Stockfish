@@ -65,10 +65,11 @@ using IndexType        = u32;
 constexpr u32 Version = 0x6A448AFAu;
 
 // Constant used in evaluation value calculation
-constexpr int OutputScale     = 16;
-constexpr int WeightScaleBits = 6;
-constexpr int FtMaxVal        = 255;
-constexpr int HiddenOneVal    = 128;
+constexpr IndexType L1              = 1024;
+constexpr int       OutputScale     = 16;
+constexpr int       WeightScaleBits = 6;
+constexpr int       FtMaxVal        = 255;
+constexpr int       HiddenOneVal    = 128;
 
 // Size of cache line (in bytes)
 constexpr usize CacheLineSize = 64;

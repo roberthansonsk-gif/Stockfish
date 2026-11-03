@@ -42,9 +42,8 @@ using PairFeatureSet   = Features::PP_3Wide;
 using PSQFeatureSet    = Features::K32H3;
 
 // Number of input feature dimensions after conversion
-constexpr IndexType L1 = 1024;
-constexpr int       L2 = 32;
-constexpr int       L3 = 32;
+constexpr int L2 = 32;
+constexpr int L3 = 32;
 
 constexpr IndexType LayerStacks = 32;
 

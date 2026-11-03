@@ -52,8 +52,7 @@ class PP_3Wide {
                                        const DiffType&         diff,
                                        IndexList&              removed,
                                        IndexList&              added,
-                                       const ThreatWeightType* prefetchBase   = nullptr,
-                                       IndexType               prefetchStride = 0);
+                                       const ThreatWeightType* prefetchBase);
 
     static void append_changed_indices_both(Square                  white_ksq,
                                             Square                  black_ksq,
@@ -62,8 +61,7 @@ class PP_3Wide {
                                             IndexList&              white_added,
                                             IndexList&              black_removed,
                                             IndexList&              black_added,
-                                            const ThreatWeightType* prefetchBase   = nullptr,
-                                            IndexType               prefetchStride = 0);
+                                            const ThreatWeightType* prefetchBase);
 };
 
 }  // namespace Stockfish::Eval::NNUE::Features

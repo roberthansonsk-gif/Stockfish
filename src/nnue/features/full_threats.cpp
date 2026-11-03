@@ -178,8 +178,7 @@ void FullThreats::append_changed_indices(Color                   perspective,
                                          const DiffType&         diff,
                                          IndexList&              removed,
                                          IndexList&              added,
-                                         const ThreatWeightType* prefetchBase,
-                                         IndexType               prefetchStride) {
+                                         const ThreatWeightType* prefetchBase) {
     const unsigned orient    = OrientTBL[ksq] ^ (56 * perspective);
     const unsigned pair_swap = 0x88 * perspective;
     const auto*    lut1_flat = &threat_luts.lut1[0][0];
@@ -194,9 +193,7 @@ void FullThreats::append_changed_indices(Color                   perspective,
 
         const IndexType index = lut1_flat[pair ^ pair_swap][from < to] + plut2[from][to];
 
-        if (prefetchBase)
-            prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(reinterpret_cast<const void*>(
-              reinterpret_cast<uintptr_t>(prefetchBase) + uintptr_t(index) * prefetchStride));
+        prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(prefetchBase + uintptr_t(index) * L1);
 
         if (raw >> 31)
             added.push_back_if_lt(index, Dimensions);
@@ -212,8 +209,7 @@ void FullThreats::append_changed_indices_both(Square                  white_ksq,
                                               IndexList&              white_added,
                                               IndexList&              black_removed,
                                               IndexList&              black_added,
-                                              const ThreatWeightType* prefetchBase,
-                                              IndexType               prefetchStride) {
+                                              const ThreatWeightType* prefetchBase) {
     const unsigned w_orient  = OrientTBL[white_ksq];
     const unsigned b_orient  = OrientTBL[black_ksq] ^ 56;
     const auto*    lut1_flat = &threat_luts.lut1[0][0];
@@ -234,13 +230,8 @@ void FullThreats::append_changed_indices_both(Square                  white_ksq,
         const unsigned  b_to        = to ^ b_orient;
         const IndexType black_index = lut1_flat[pair ^ 0x88][b_from < b_to] + plut2[b_from][b_to];
 
-        if (prefetchBase)
-        {
-            prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(reinterpret_cast<const void*>(
-              reinterpret_cast<uintptr_t>(prefetchBase) + uintptr_t(white_index) * prefetchStride));
-            prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(reinterpret_cast<const void*>(
-              reinterpret_cast<uintptr_t>(prefetchBase) + uintptr_t(black_index) * prefetchStride));
-        }
+        prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(prefetchBase + uintptr_t(white_index) * L1);
+        prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(prefetchBase + uintptr_t(black_index) * L1);
 
         if (raw >> 31)
         {

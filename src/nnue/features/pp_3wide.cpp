@@ -96,8 +96,7 @@ void PP_3Wide::append_changed_indices(Color                                    p
                                       const DiffType&                          diff,
                                       IndexList&                               removed,
                                       IndexList&                               added,
-                                      [[maybe_unused]] const ThreatWeightType* prefetchBase,
-                                      [[maybe_unused]] IndexType               prefetchStride) {
+                                      [[maybe_unused]] const ThreatWeightType* prefetchBase) {
 
     const Bitboard whiteBefore = diff.before[WHITE];
     const Bitboard blackBefore = diff.before[BLACK];
@@ -143,9 +142,7 @@ void PP_3Wide::append_changed_indices(Color                                    p
     auto generate = [&](Bitboard updatedW, Bitboard updatedB, Bitboard pawnsW, Bitboard pawnsB,
                         IndexList& out) {
         auto push = [&](IndexType index) {
-            if (prefetchBase)
-                prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(reinterpret_cast<const void*>(
-                  reinterpret_cast<uintptr_t>(prefetchBase) + uintptr_t(index) * prefetchStride));
+            prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(prefetchBase + uintptr_t(index) * L1);
             out.push_back(index);
         };
         const Bitboard unchanged = (pawnsW | pawnsB) & ~(updatedW | updatedB);
@@ -174,14 +171,11 @@ void PP_3Wide::append_changed_indices_both(Square                  white_ksq,
                                            IndexList&              white_added,
                                            IndexList&              black_removed,
                                            IndexList&              black_added,
-                                           const ThreatWeightType* prefetchBase,
-                                           IndexType               prefetchStride) {
+                                           const ThreatWeightType* prefetchBase) {
 
 #ifdef USE_AVX512ICL
-    append_changed_indices(WHITE, white_ksq, diff, white_removed, white_added, prefetchBase,
-                           prefetchStride);
-    append_changed_indices(BLACK, black_ksq, diff, black_removed, black_added, prefetchBase,
-                           prefetchStride);
+    append_changed_indices(WHITE, white_ksq, diff, white_removed, white_added, prefetchBase);
+    append_changed_indices(BLACK, black_ksq, diff, black_removed, black_added, prefetchBase);
 #else
     const Bitboard whiteBefore = diff.before[WHITE];
     const Bitboard blackBefore = diff.before[BLACK];
@@ -199,15 +193,10 @@ void PP_3Wide::append_changed_indices_both(Square                  white_ksq,
             const IndexType black_index =
               make_index(BLACK, color, from, to, pairedColor, black_ksq);
 
-            if (prefetchBase)
-            {
-                prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(
-                  reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(prefetchBase)
-                                                + uintptr_t(white_index) * prefetchStride));
-                prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(
-                  reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(prefetchBase)
-                                                + uintptr_t(black_index) * prefetchStride));
-            }
+            prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(prefetchBase
+                                                         + uintptr_t(white_index) * L1);
+            prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(prefetchBase
+                                                         + uintptr_t(black_index) * L1);
 
             white_out.push_back(white_index);
             black_out.push_back(black_index);
