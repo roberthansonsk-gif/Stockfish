@@ -530,31 +530,91 @@ sf_always_inline Tile apply_combined_features(IndexType                         
     return apply_features<sign>(j, acc, thr.begin() + thrBegin, thr.ssize() - thrBegin, thrWeights);
 }
 
-void apply_combined(Color                              perspective,
-                    const FeatureTransformer&          featureTransformer,
-                    const AccumulatorState&            from,
-                    AccumulatorState&                  to,
+void apply_combined(const i16* RESTRICT                fromAcc,
+                    i16* RESTRICT                      toAcc,
+                    const WeightType* RESTRICT         thrBase,
+                    const WeightType* RESTRICT         psqWeights,
                     const PSQFeatureSet::IndexList&    psqAdded,
                     const PSQFeatureSet::IndexList&    psqRemoved,
                     const ThreatFeatureSet::IndexList& thrAdded,
-                    const ThreatFeatureSet::IndexList& thrRemoved,
-                    const WeightType*                  psqWeights) {
+                    const ThreatFeatureSet::IndexList& thrRemoved) {
 
-    const auto& fromAcc = from.accumulation[perspective];
-    auto&       toAcc   = to.accumulation[perspective];
+    assert(psqRemoved.size() == 1 || psqRemoved.size() == 2);
+    assert(psqAdded.size() == 1 || psqAdded.size() == 2);
+
+    const WeightType* const rem0    = &psqWeights[usize(psqRemoved[0]) * Dimensions];
+    const u16*              thrRem  = thrRemoved.begin();
+    int                     thrRemN = thrRemoved.ssize();
+#if defined(USE_PAIRED_WIDENING_ADD)
+    const WeightType*       rem1    = nullptr;
+    if (psqRemoved.size() == 2)
+        rem1 = &psqWeights[usize(psqRemoved[1]) * Dimensions];
+    else if (thrRemN > 0)
+    {
+        rem1 = &thrBase[usize(thrRem[0]) * Dimensions];
+        ++thrRem;
+        --thrRemN;
+    }
+#else
+    const bool              hasRem1 = psqRemoved.size() == 2;
+    const WeightType* const rem1    = &psqWeights[usize(psqRemoved[1]) * Dimensions];
+#endif
+
+    const WeightType* const add0    = &psqWeights[usize(psqAdded[0]) * Dimensions];
+    const u16*              thrAdd  = thrAdded.begin();
+    int                     thrAddN = thrAdded.ssize();
+#if defined(USE_PAIRED_WIDENING_ADD)
+    const WeightType*       add1    = nullptr;
+    if (psqAdded.size() == 2)
+        add1 = &psqWeights[usize(psqAdded[1]) * Dimensions];
+    else if (thrAddN > 0)
+    {
+        add1 = &thrBase[usize(thrAdd[0]) * Dimensions];
+        ++thrAdd;
+        --thrAddN;
+    }
+#else
+    const bool              hasAdd1 = psqAdded.size() == 2;
+    const WeightType* const add1    = &psqWeights[usize(psqAdded[1]) * Dimensions];
+#endif
 
     Tile acc;
 
     for (IndexType j = 0; j < Dimensions; increment_index(j))
     {
-        acc = load_tile(j, fromAcc.data());
+#ifdef USE_RVV
+        acc = load_tile(j, fromAcc);
+#else
+        acc = load_tile(0, fromAcc);
+        fromAcc += Tiling::TileHeight;
+#endif
 
-        acc = apply_combined_features<-1, true>(j, acc, psqRemoved, thrRemoved, featureTransformer,
-                                                psqWeights);
-        acc = apply_combined_features<+1, true>(j, acc, psqAdded, thrAdded, featureTransformer,
-                                                psqWeights);
+#if defined(USE_PAIRED_WIDENING_ADD)
+        acc = rem1 ? apply_feature_pair<-1>(acc, &rem0[j], &rem1[j])
+                   : apply_feature_single<-1>(j, acc, &rem0[j]);
+#else
+        acc = apply_feature_single<-1>(j, acc, &rem0[j]);
+        if (hasRem1)
+            acc = apply_feature_single<-1>(j, acc, &rem1[j]);
+#endif
+        acc = apply_features<-1>(j, acc, thrRem, thrRemN, &thrBase[j]);
 
-        store_tile(j, toAcc.data(), acc);
+#if defined(USE_PAIRED_WIDENING_ADD)
+        acc = add1 ? apply_feature_pair<+1>(acc, &add0[j], &add1[j])
+                   : apply_feature_single<+1>(j, acc, &add0[j]);
+#else
+        acc = apply_feature_single<+1>(j, acc, &add0[j]);
+        if (hasAdd1)
+            acc = apply_feature_single<+1>(j, acc, &add1[j]);
+#endif
+        acc = apply_features<+1>(j, acc, thrAdd, thrAddN, &thrBase[j]);
+
+#ifdef USE_RVV
+        store_tile(j, toAcc, acc);
+#else
+        store_tile(0, toAcc, acc);
+        toAcc += Tiling::TileHeight;
+#endif
     }
 }
 
@@ -601,8 +661,10 @@ void update_accumulator_incremental(Color                     perspective,
         PSQFeatureSet::append_changed_indices(perspective, ksq, dirtyPiece, psqAdded, psqRemoved);
     }
 
-    apply_combined(perspective, featureTransformer, computed, target_state, psqAdded, psqRemoved,
-                   thrAdded, thrRemoved, featureTransformer.psq_weights(psqBlock));
+    apply_combined(computed.accumulation[perspective].data(),
+                   target_state.accumulation[perspective].data(), threatPpBase,
+                   featureTransformer.psq_weights(psqBlock), psqAdded, psqRemoved, thrAdded,
+                   thrRemoved);
 
     target_state.computed[perspective] = true;
 }
@@ -637,12 +699,12 @@ void update_accumulator_incremental_both(const FeatureTransformer& featureTransf
     PSQFeatureSet::append_changed_indices(BLACK, black_ksq, target_state.dirtyPiece,
                                           psq_removed[BLACK], psq_added[BLACK]);
 
-    apply_combined(WHITE, featureTransformer, computed, target_state, psq_added[WHITE],
-                   psq_removed[WHITE], thr_added[WHITE], thr_removed[WHITE],
-                   featureTransformer.psq_weights(whiteBlock));
-    apply_combined(BLACK, featureTransformer, computed, target_state, psq_added[BLACK],
-                   psq_removed[BLACK], thr_added[BLACK], thr_removed[BLACK],
-                   featureTransformer.psq_weights(blackBlock));
+    apply_combined(computed.accumulation[WHITE].data(), target_state.accumulation[WHITE].data(),
+                   threat_pp_base, featureTransformer.psq_weights(whiteBlock), psq_added[WHITE],
+                   psq_removed[WHITE], thr_added[WHITE], thr_removed[WHITE]);
+    apply_combined(computed.accumulation[BLACK].data(), target_state.accumulation[BLACK].data(),
+                   threat_pp_base, featureTransformer.psq_weights(blackBlock), psq_added[BLACK],
+                   psq_removed[BLACK], thr_added[BLACK], thr_removed[BLACK]);
 
     target_state.computed[WHITE] = true;
     target_state.computed[BLACK] = true;
