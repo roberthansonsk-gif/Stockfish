@@ -100,13 +100,18 @@ int correction_value(const Worker& w, const Position& pos, const Stack* const ss
     const int   micv   = shared.minor_piece_correction_entry(pos)[us].minor;
     const int   wnpcv  = shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite;
     const int   bnpcv  = shared.nonpawn_correction_entry<BLACK>(pos)[us].nonPawnBlack;
-    const int   cntcv =
-      m.is_ok()
-          ? 7885
-              * ((*(ss - 2)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
-                 + (*(ss - 4)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()])
-            + 6307 * (*(ss - 6)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
-          : 80695;
+
+    int cntcv = 80695;
+    if (m.is_ok())
+    {
+        const Square to   = m.to_sq();
+        const Piece  pc   = pos.piece_on(to);
+        const usize  pcTo = pc * SQUARE_NB + to;
+        cntcv             = 7885
+                * ((&(*(ss - 2)->continuationCorrectionHistory)[0][0])[pcTo]
+                   + (&(*(ss - 4)->continuationCorrectionHistory)[0][0])[pcTo])
+              + 6307 * (&(*(ss - 6)->continuationCorrectionHistory)[0][0])[pcTo];
+    }
 
     return 13806 * pcv + 9512 * micv + 11615 * (wnpcv + bnpcv) + cntcv;
 }
@@ -127,18 +132,28 @@ void update_correction_history(const Position& pos,
     constexpr int nonPawnWeight = 186;
     auto&         shared        = workerThread.sharedHistory;
 
-    shared.pawn_correction_entry(pos)[us].pawn << bonus;
-    shared.minor_piece_correction_entry(pos)[us].minor << bonus * 150 / 128;
-    shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite << bonus * nonPawnWeight / 128;
-    shared.nonpawn_correction_entry<BLACK>(pos)[us].nonPawnBlack << bonus * nonPawnWeight / 128;
+    auto& pawnEntry  = shared.pawn_correction_entry(pos)[us].pawn;
+    auto& minorEntry = shared.minor_piece_correction_entry(pos)[us].minor;
+    auto& wnpEntry   = shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite;
+    auto& bnpEntry   = shared.nonpawn_correction_entry<BLACK>(pos)[us].nonPawnBlack;
+
+    const int nonPawnBonus = bonus * nonPawnWeight / 128;
+    pawnEntry << bonus;
+    minorEntry << bonus * 150 / 128;
+    wnpEntry << nonPawnBonus;
+    bnpEntry << nonPawnBonus;
 
     if (m.is_ok())
     {
-        const Square to = m.to_sq();
-        const Piece  pc = pos.piece_on(to);
-        (*(ss - 2)->continuationCorrectionHistory)[pc][to] << bonus * 130 / 128;
-        (*(ss - 4)->continuationCorrectionHistory)[pc][to] << bonus * 70 / 128;
-        (*(ss - 6)->continuationCorrectionHistory)[pc][to] << bonus * 35 / 128;
+        const Square to   = m.to_sq();
+        const Piece  pc   = pos.piece_on(to);
+        const usize  pcTo = pc * SQUARE_NB + to;
+        auto&        cch2 = (&(*(ss - 2)->continuationCorrectionHistory)[0][0])[pcTo];
+        auto&        cch4 = (&(*(ss - 4)->continuationCorrectionHistory)[0][0])[pcTo];
+        auto&        cch6 = (&(*(ss - 6)->continuationCorrectionHistory)[0][0])[pcTo];
+        cch2 << bonus * 130 / 128;
+        cch4 << bonus * 70 / 128;
+        cch6 << bonus * 35 / 128;
     }
 }
 
@@ -162,10 +177,8 @@ void update_all_stats(const Position& pos,
 
 // Detect shuffling moves in order to limit search explosions. This code was
 // added in #6447 as non-regression, and so its parameters should not be tuned.
-bool is_shuffling(Move move, Stack* const ss, const Position& pos) {
-    if (pos.capture_stage(move) || pos.rule50_count() < 10)
-        return false;
-    if (pos.state()->pliesFromNull < 6 || ss->ply < 20)
+sf_always_inline bool is_shuffling(Move move, Stack* const ss, const Position& pos) {
+    if (ss->ply < 20 || pos.rule50_count() < 10 || pos.state()->pliesFromNull < 6)
         return false;
     return move.from_sq() == (ss - 2)->currentMove.to_sq()
         && (ss - 2)->currentMove.from_sq() == (ss - 4)->currentMove.to_sq();
@@ -830,8 +843,6 @@ Value Search::Worker::search(
     (ss + 2)->cutoffCnt        = 0;
     (ss + 1)->priorNMPFailHigh = 0;
 
-    const auto correctionValue = correction_value(*this, pos, ss);
-
     // Step 4. Transposition table lookup
     excludedMove                   = ss->excludedMove;
     posKey                         = pos.key();
@@ -842,6 +853,8 @@ Value Search::Worker::search(
     ttData.value = ttHit ? value_from_tt(ttData.value, ss->ply, pos.rule50_count()) : VALUE_NONE;
     ss->ttPv     = excludedMove ? ss->ttPv : PvNode || (ttHit && ttData.is_pv);
     ttCapture    = ttData.move && pos.capture_stage(ttData.move);
+
+    const auto correctionValue = correction_value(*this, pos, ss);
 
     // Step 5. Static evaluation of the position
     Value unadjustedStaticEval = VALUE_NONE;
@@ -1142,7 +1155,7 @@ moves_loop:  // When in check, search starts here
     const PieceToHistory* contHist[] = {
       (ss - 1)->continuationHistory, (ss - 2)->continuationHistory, (ss - 3)->continuationHistory,
       (ss - 4)->continuationHistory, (ss - 5)->continuationHistory, (ss - 6)->continuationHistory};
-
+    const auto& pawnHist = sharedHistory.pawn_entry(pos);
 
     MovePicker mp(pos, ttData.move, depth, &mainHistory, &lowPlyHistory, &captureHistory, contHist,
                   &sharedHistory, ss->ply);
@@ -1228,9 +1241,10 @@ moves_loop:  // When in check, search starts here
             }
             else if (!ss->followPV || !PvNode)
             {
-                int history = (*contHist[0])[movedPiece][move.to_sq()]
-                            + (*contHist[1])[movedPiece][move.to_sq()]
-                            + sharedHistory.pawn_entry(pos)[movedPiece][move.to_sq()];
+                const usize pcTo    = movedPiece * SQUARE_NB + move.to_sq();
+                int         history = (&(*contHist[0])[0][0])[pcTo]
+                            + (&(*contHist[1])[0][0])[pcTo]
+                            + (&pawnHist[0][0])[pcTo];
 
                 // Continuation history based pruning
                 if (history < -4136 * depth)
@@ -1276,7 +1290,7 @@ moves_loop:  // When in check, search starts here
         // and lower extension margins scale well.
         if (!rootNode && move == ttData.move && !excludedMove && depth >= 6 + ss->ttPv
             && is_valid(ttData.value) && !is_decisive(ttData.value) && (ttData.bound & BOUND_LOWER)
-            && ttData.depth >= depth - 3 && !is_shuffling(move, ss, pos) && !seekMate)
+            && ttData.depth >= depth - 3 && !seekMate && (capture || !is_shuffling(move, ss, pos)))
         {
             Value singularBeta  = ttData.value - (59 + 66 * (ss->ttPv && !PvNode)) * depth / 63;
             Depth singularDepth = newDepth / 2;
@@ -1624,15 +1638,15 @@ moves_loop:  // When in check, search starts here
 
         // scaledBonus ranges from 0 to roughly 2.3M, overflows happen for
         // multipliers larger than 900
-        const int scaledBonus = std::min(150 * depth - 85, 1337) * bonusScale;
+        const int   scaledBonus = std::min(150 * depth - 85, 1337) * bonusScale;
+        const Piece prevPc      = pos.piece_on(prevSq);
 
-        update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq,
-                                      scaledBonus * 263 / 16384);
+        update_continuation_histories(ss - 1, prevPc, prevSq, scaledBonus * 263 / 16384);
 
         mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 215 / 32768;
 
-        if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
-            sharedHistory.pawn_entry(pos)[pos.piece_on(prevSq)][prevSq] << scaledBonus * 324 / 8192;
+        if (type_of(prevPc) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
+            sharedHistory.pawn_entry(pos)[prevPc][prevSq] << scaledBonus * 324 / 8192;
     }
 
     // Bonus for prior capture countermove that caused the fail low
@@ -2014,14 +2028,34 @@ void update_all_stats(const Position& pos,
 
     if (!pos.capture_stage(bestMove))
     {
-        update_quiet_histories(pos, ss, workerThread, bestMove, bonus * 899 / 1024);
+        auto& mainHist = workerThread.mainHistory[pos.side_to_move()];
+        auto& pawnHist = workerThread.sharedHistory.pawn_entry(pos);
+        auto* lowPlyRow =
+          (ss->ply < LOW_PLY_HISTORY_SIZE) ? &workerThread.lowPlyHistory[ss->ply] : nullptr;
+
+        auto update_quiet = [&](Move move, int b) {
+            const Piece  pc  = pos.moved_piece(move);
+            const Square to  = move.to_sq();
+            const auto   raw = move.raw();
+
+            mainHist[raw] << b;
+
+            if (lowPlyRow)
+                (*lowPlyRow)[raw] << b * 712 / 1024;
+
+            pawnHist[pc][to] << b * (b > -4 ? 1104 : 459) / 1024;
+
+            update_continuation_histories(ss, pc, to, b * 750 / 1024);
+        };
+
+        update_quiet(bestMove, bonus * 899 / 1024);
 
         // Decrease stats for all non-best quiet moves
         int actualMalus = malus * 1159 / 1024;
         for (Move move : quietsSearched)
         {
             actualMalus = actualMalus * 921 / 1024;
-            update_quiet_histories(pos, ss, workerThread, move, -actualMalus);
+            update_quiet(move, -actualMalus);
         }
     }
     else
@@ -2037,11 +2071,12 @@ void update_all_stats(const Position& pos,
         update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, -malus * 713 / 1024);
 
     // Decrease stats for all non-best capture moves
+    const int captureMalus = -malus * 1489 / 1024;
     for (Move move : capturesSearched)
     {
         movedPiece    = pos.moved_piece(move);
         capturedPiece = type_of(pos.piece_on(move.to_sq()));
-        captureHistory[movedPiece][move.to_sq()][capturedPiece] << -malus * 1489 / 1024;
+        captureHistory[movedPiece][move.to_sq()][capturedPiece] << captureMalus;
     }
 }
 
@@ -2055,18 +2090,19 @@ void update_continuation_histories(Stack* ss, Piece pc, Square to, int bonus) {
     // Multipliers for positive history consistency
     constexpr int CMHCMultipliers[] = {94, 103, 110, 106, 119, 126};
     int           positiveCount     = 0;
+    const bool    inCheck           = ss->inCheck;
+    const usize   pcTo              = pc * SQUARE_NB + to;
 
     for (const auto [i, weight] : conthist_bonuses)
     {
         // Only update the first 2 continuation histories if we are in check
-        if (ss->inCheck && i > 2)
+        if (inCheck && i > 2)
             break;
 
         if (((ss - i)->currentMove).is_ok())
         {
-            auto& historyEntry = (*(ss - i)->continuationHistory)[pc][to];
-            if (historyEntry > 0)
-                positiveCount++;
+            auto& historyEntry = (&(*(ss - i)->continuationHistory)[0][0])[pcTo];
+            positiveCount += (historyEntry > 0);
 
             int multiplier = CMHCMultipliers[positiveCount];
             historyEntry << bonus * weight * multiplier / 65536 + 73 * (i < 2);
@@ -2079,16 +2115,19 @@ void update_continuation_histories(Stack* ss, Piece pc, Square to, int bonus) {
 void update_quiet_histories(
   const Position& pos, Stack* ss, Search::Worker& workerThread, Move move, int bonus) {
 
-    Color us = pos.side_to_move();
+    const Color  us = pos.side_to_move();
+    const Piece  pc = pos.moved_piece(move);
+    const Square to = move.to_sq();
+
     workerThread.mainHistory[us][move.raw()] << bonus;  // Untuned to prevent duplicate effort
 
     if (ss->ply < LOW_PLY_HISTORY_SIZE)
         workerThread.lowPlyHistory[ss->ply][move.raw()] << bonus * 712 / 1024;
 
-    update_continuation_histories(ss, pos.moved_piece(move), move.to_sq(), bonus * 750 / 1024);
-
-    workerThread.sharedHistory.pawn_entry(pos)[pos.moved_piece(move)][move.to_sq()]
+    workerThread.sharedHistory.pawn_entry(pos)[pc][to]
       << bonus * (bonus > -4 ? 1104 : 459) / 1024;
+
+    update_continuation_histories(ss, pc, to, bonus * 750 / 1024);
 }
 }
 
