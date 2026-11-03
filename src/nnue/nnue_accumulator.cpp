@@ -57,14 +57,16 @@ void update_accumulator_refresh_cache(Color                     perspective,
                                       const FeatureTransformer& featureTransformer,
                                       const Position&           pos,
                                       AccumulatorState&         accumulatorState,
-                                      AccumulatorCaches&        cache);
+                                      AccumulatorCaches&        cache,
+                                      int                       psqBlock);
 
 void update_accumulator_hybrid(Color                     perspective,
                                const Position&           pos,
                                const FeatureTransformer& featureTransformer,
                                AccumulatorState&         target,
                                const AccumulatorState&   computed,
-                               AccumulatorCaches&        cache);
+                               AccumulatorCaches&        cache,
+                               int                       psqBlock);
 
 }
 
@@ -100,15 +102,19 @@ void AccumulatorStack::evaluate(const Position&           pos,
                                 const FeatureTransformer& featureTransformer,
                                 // Silence spurious warning on GCC 10
                                 [[maybe_unused]] AccumulatorCaches& cache) noexcept {
-    const usize last_white = find_last_usable_accumulator(WHITE, pos);
-    const usize last_black = find_last_usable_accumulator(BLACK, pos);
+    const auto  after      = PSQFeatureSet::block_state(pos);
+    const int   whiteBlock = PSQFeatureSet::block(after, WHITE);
+    const int   blackBlock = PSQFeatureSet::block(after, BLACK);
+    const usize last_white = find_last_usable_accumulator(WHITE, after);
+    const usize last_black = find_last_usable_accumulator(BLACK, after);
 
     if (accumulators[last_white].computed[WHITE] && accumulators[last_black].computed[BLACK])
-        forward_update_incremental_both(pos, featureTransformer, last_white, last_black);
+        forward_update_incremental_both(pos, featureTransformer, last_white, last_black, whiteBlock,
+                                        blackBlock);
     else
     {
-        evaluate_side(WHITE, pos, featureTransformer, cache, last_white);
-        evaluate_side(BLACK, pos, featureTransformer, cache, last_black);
+        evaluate_side(WHITE, pos, featureTransformer, cache, last_white, whiteBlock);
+        evaluate_side(BLACK, pos, featureTransformer, cache, last_black, blackBlock);
     }
 }
 
@@ -116,44 +122,46 @@ void AccumulatorStack::evaluate_side(Color                     perspective,
                                      const Position&           pos,
                                      const FeatureTransformer& featureTransformer,
                                      AccumulatorCaches&        cache,
-                                     usize                     last_usable_accum) noexcept {
+                                     usize                     last_usable_accum,
+                                     int                       psqBlock) noexcept {
 
     constexpr int MIN_PC_COUNT_HYBRID = 15;
 
     if (accumulators[last_usable_accum].computed[perspective])
-        forward_update_incremental(perspective, pos, featureTransformer, last_usable_accum);
+        forward_update_incremental(perspective, pos, featureTransformer, last_usable_accum,
+                                   psqBlock);
 
     else
     {
         const auto& dirtyPiece = latest().dirtyPiece;
-        const auto  after      = PSQFeatureSet::block_state(pos);
         const auto& before     = latest().blockBefore;
 
         if (dirtyPiece.pc == make_piece(perspective, KING)
-            && PSQFeatureSet::block(before, perspective) == PSQFeatureSet::block(after, perspective)
+            && PSQFeatureSet::block(before, perspective) == psqBlock
             && accumulators[size - 2].computed[perspective]
             && pos.count<ALL_PIECES>() >= MIN_PC_COUNT_HYBRID
             && ((int(dirtyPiece.from) & 0b100) == (int(dirtyPiece.to) & 0b100))
             && dirtyPiece.add_sq == SQ_NONE)  // excludes castling
         {
             update_accumulator_hybrid(perspective, pos, featureTransformer, mut_latest(),
-                                      accumulators[size - 2], cache);
+                                      accumulators[size - 2], cache, psqBlock);
             return;
         }
 
-        update_accumulator_refresh_cache(perspective, featureTransformer, pos, mut_latest(), cache);
-        backward_update_incremental(perspective, pos, featureTransformer, last_usable_accum);
+        update_accumulator_refresh_cache(perspective, featureTransformer, pos, mut_latest(), cache,
+                                         psqBlock);
+        backward_update_incremental(perspective, pos, featureTransformer, last_usable_accum,
+                                    psqBlock);
     }
 }
 
 // Find the earliest usable accumulator, this can either be a computed accumulator or the accumulator
 // state just before a change that requires full refresh.
-usize AccumulatorStack::find_last_usable_accumulator(Color           perspective,
-                                                     const Position& pos) const noexcept {
+usize
+AccumulatorStack::find_last_usable_accumulator(Color                            perspective,
+                                               const PSQFeatureSet::BlockState& after) const noexcept {
 
     // Backtrack psq block changes
-    auto after = PSQFeatureSet::block_state(pos);
-
     for (usize curr_idx = size - 1; curr_idx > 0; curr_idx--)
     {
         if (accumulators[curr_idx].computed[perspective])
@@ -166,8 +174,6 @@ usize AccumulatorStack::find_last_usable_accumulator(Color           perspective
         // a subset of halfka refreshes
         if (PSQFeatureSet::requires_refresh(dirtyPiece, perspective, before, after))
             return curr_idx;
-
-        after = before;
     }
 
     return 0;
@@ -176,13 +182,13 @@ usize AccumulatorStack::find_last_usable_accumulator(Color           perspective
 void AccumulatorStack::forward_update_incremental(Color                     perspective,
                                                   const Position&           pos,
                                                   const FeatureTransformer& featureTransformer,
-                                                  const usize               begin) noexcept {
+                                                  const usize               begin,
+                                                  int                       psqBlock) noexcept {
 
     assert(begin < accumulators.size());
     assert(accumulators[begin].computed[perspective]);
 
-    const Square ksq      = pos.square<KING>(perspective);
-    const int    psqBlock = PSQFeatureSet::block(pos, perspective);
+    const Square ksq = pos.square<KING>(perspective);
 
     for (usize next = begin + 1; next < size; next++)
         update_accumulator_incremental<true>(perspective, featureTransformer, ksq, psqBlock,
@@ -194,14 +200,17 @@ void AccumulatorStack::forward_update_incremental(Color                     pers
 void AccumulatorStack::backward_update_incremental(Color                     perspective,
                                                    const Position&           pos,
                                                    const FeatureTransformer& featureTransformer,
-                                                   const usize               end) noexcept {
+                                                   const usize               end,
+                                                   int                       psqBlock) noexcept {
 
     assert(end < accumulators.size());
     assert(end < size);
     assert(latest().computed[perspective]);
 
-    const Square ksq      = pos.square<KING>(perspective);
-    const int    psqBlock = PSQFeatureSet::block(pos, perspective);
+    if (end == size - 1)
+        return;
+
+    const Square ksq = pos.square<KING>(perspective);
 
     for (i64 next = i64(size) - 2; next >= i64(end); next--)
         update_accumulator_incremental<false>(perspective, featureTransformer, ksq, psqBlock,
@@ -213,7 +222,9 @@ void AccumulatorStack::backward_update_incremental(Color                     per
 void AccumulatorStack::forward_update_incremental_both(const Position&           pos,
                                                        const FeatureTransformer& featureTransformer,
                                                        usize                     white_begin,
-                                                       usize black_begin) noexcept {
+                                                       usize                     black_begin,
+                                                       int                       whiteBlock,
+                                                       int                       blackBlock) noexcept {
 
     assert(white_begin < size);
     assert(black_begin < size);
@@ -222,8 +233,6 @@ void AccumulatorStack::forward_update_incremental_both(const Position&          
 
     const Square white_ksq    = pos.square<KING>(WHITE);
     const Square black_ksq    = pos.square<KING>(BLACK);
-    const int    whiteBlock   = PSQFeatureSet::block(pos, WHITE);
-    const int    blackBlock   = PSQFeatureSet::block(pos, BLACK);
     const usize  shared_begin = std::max(white_begin, black_begin);
 
     // Catch up the lagging perspective, then traverse the common suffix once.
@@ -792,7 +801,8 @@ void update_accumulator_hybrid(Color                     perspective,
                                const FeatureTransformer& featureTransformer,
                                AccumulatorState&         target,
                                const AccumulatorState&   computed,
-                               AccumulatorCaches&        cache) {
+                               AccumulatorCaches&        cache,
+                               int                       psqBlock) {
     const auto& dirtyPiece = target.dirtyPiece;
 
     assert(dirtyPiece.pc == make_piece(perspective, KING));
@@ -827,7 +837,6 @@ void update_accumulator_hybrid(Color                     perspective,
     previousPieces[oldKsq] = make_piece(perspective, KING);
     previousPieceBB |= square_bb(oldKsq);
 
-    const int   psqBlock   = PSQFeatureSet::block(pos, perspective);
     const auto& oldEntry   = cache[psqBlock][oldKsq][perspective];
     auto&       newEntry   = cache[psqBlock][newKsq][perspective];
     const auto* psqWeights = featureTransformer.psq_weights(psqBlock);
@@ -892,9 +901,9 @@ void update_accumulator_refresh_cache(Color                     perspective,
                                       const FeatureTransformer& featureTransformer,
                                       const Position&           pos,
                                       AccumulatorState&         accumulator,
-                                      AccumulatorCaches&        cache) {
+                                      AccumulatorCaches&        cache,
+                                      int                       psqBlock) {
 
-    const int                psqBlock   = PSQFeatureSet::block(pos, perspective);
     const Square             ksq        = pos.square<KING>(perspective);
     auto&                    entry      = cache[psqBlock][ksq][perspective];
     const auto*              psqWeights = featureTransformer.psq_weights(psqBlock);
