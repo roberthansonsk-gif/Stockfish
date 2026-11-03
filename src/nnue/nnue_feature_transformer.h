@@ -283,6 +283,9 @@ class FeatureTransformer {
         const vec_t* in0 = reinterpret_cast<const vec_t*>(&accumulation[0]);
         const vec_t* in1 = reinterpret_cast<const vec_t*>(&accumulation[HalfDimensions / 2]);
         vec_t*       out = reinterpret_cast<vec_t*>(output + offset);
+    #if defined(USE_NEON) && (defined(__clang__) || defined(__GNUC__))
+        __asm__("" : "+r"(in1));
+    #endif
 
         // Per the NNUE architecture, here we want to multiply pairs of
         // clipped elements and divide the product by 512. To do this,
@@ -368,8 +371,11 @@ class FeatureTransformer {
                 vec_t result = vec_packus_16(pa, pb);
     #endif
 
-                packed[k] = out[j + k] = result;
+                packed[k] = result;
             }
+
+            out[j + 0] = packed[0];
+            out[j + 1] = packed[1];
 
             cursor.record2(packed[0], packed[1]);
         }
