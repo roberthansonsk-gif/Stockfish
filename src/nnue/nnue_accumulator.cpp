@@ -80,14 +80,15 @@ void AccumulatorStack::reset() noexcept {
     size = 1;
 }
 
-Dirties& AccumulatorStack::push(const Position& pos) noexcept {
+__attribute__((always_inline)) Dirties& AccumulatorStack::push(const Position& pos) noexcept {
     assert(size < MaxSize);
-    auto& st = accumulators[size];
+    const usize idx = size;
+    size            = idx + 1;
+    auto& st        = accumulators[idx];
     st.computed.fill(false);
     st.blockBefore = PSQFeatureSet::block_state(pos);
     new (&st.dirtyThreats) DirtyThreats;
     new (&st.dirtyPawnPairs) DirtyPawnPairs;
-    size++;
     return st;
 }
 
