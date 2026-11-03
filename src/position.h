@@ -191,6 +191,7 @@ class Position {
     void set_castling_right(Color c, Square rfrom);
     Key  compute_material_key() const;
     void set_state() const;
+    template<bool UpdateBlockers = true>
     void set_extra_bitboards() const;
     void compute_threats() const;
 
