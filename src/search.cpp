@@ -681,22 +681,18 @@ void Search::Worker::do_move(Position&    pos,
         prefetch(&(*(ss - 1)->continuationCorrectionHistory)[pc][to]);
         prefetch(&(*(ss - 3)->continuationCorrectionHistory)[pc][to]);
         prefetch(&(*(ss - 5)->continuationCorrectionHistory)[pc][to]);
+
+        ss->currentMove = move;
+        ss->continuationHistory =
+          &continuationHistory[ss->inCheck][capture][pc][to];
+        ss->continuationCorrectionHistory =
+          &continuationCorrectionHistory[pc][to];
     }
 
     ++nodes;
 
     Dirties& dirties = accumulatorStack.push(pos);
     pos.do_move(move, st, givesCheck, dirties, &sharedHistory);
-
-    if (ss != nullptr)
-    {
-        auto& dirtyPiece = dirties.dirtyPiece;
-        ss->currentMove  = move;
-        ss->continuationHistory =
-          &continuationHistory[ss->inCheck][capture][dirtyPiece.pc][move.to_sq()];
-        ss->continuationCorrectionHistory =
-          &continuationCorrectionHistory[dirtyPiece.pc][move.to_sq()];
-    }
 }
 
 void Search::Worker::do_null_move(Position& pos, StateInfo& st, Stack* const ss) {

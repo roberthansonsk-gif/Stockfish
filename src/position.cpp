@@ -1343,7 +1343,7 @@ void Position::update_swap_threats(Piece               oldPc,
         emit(newPc, true);
 }
 
-Key Position::prefetch_key(Move m) const {
+__attribute__((always_inline)) Key Position::prefetch_key(Move m) const {
     Square from     = m.from_sq();
     Square to       = m.to_sq();
     Piece  pc       = piece_on(from);
@@ -1352,10 +1352,13 @@ Key Position::prefetch_key(Move m) const {
 
     k ^= Zobrist::psq[captured][to] ^ Zobrist::psq[pc][to] ^ Zobrist::psq[pc][from];
 
+    if (st->rule50 < 13)
+        return k;
+
     if (captured || type_of(pc) == PAWN)
         return k;
 
-    return adjust_key50<true>(k);
+    return k ^ make_key((st->rule50 - 13) / 8);
 }
 
 // Helper used to do/undo a castling move. This is a bit
