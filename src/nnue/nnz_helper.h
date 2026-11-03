@@ -101,6 +101,11 @@ struct NNZInfo {
         }
 
         ~NNZCursor() { info.count = count; }
+
+        void record4(SIMD::vec_t n0, SIMD::vec_t n1, SIMD::vec_t n2, SIMD::vec_t n3) {
+            record2(n0, n1);
+            record2(n2, n3);
+        }
     };
 
     NNZCursor make_cursor(bool perspective) { return {*this, perspective, count}; }
@@ -123,17 +128,12 @@ struct NNZInfo {
             using namespace SIMD;
 
         #ifdef USE_NEON
-            alignas(16) static constexpr u16 Mask8[8] = {1, 16, 2, 32, 4, 64, 8, 128};
+            alignas(16) static constexpr u16 Mask8[8] = {1, 2, 4, 8, 16, 32, 64, 128};
 
-            uint32x4_t n1 = vreinterpretq_u32_s16(neurons1);
-            uint32x4_t n2 = vreinterpretq_u32_s16(neurons2);
-
-            const uint32x4_t t1 = vtstq_u32(n1, n1);
-            const uint32x4_t t2 = vtstq_u32(n2, n2);
-
-            const uint16x8_t packed =
-              vtrn1q_u16(vreinterpretq_u16_u32(t1), vreinterpretq_u16_u32(t2));
-            const uint16x8_t bits = vandq_u16(packed, vld1q_u16(Mask8));
+            const uint16x8_t p    = vpmaxq_u16(vreinterpretq_u16_s16(neurons1),
+                                               vreinterpretq_u16_s16(neurons2));
+            const uint16x8_t t    = vtstq_u16(p, p);
+            const uint16x8_t bits = vandq_u16(t, vld1q_u16(Mask8));
 
             *out++ = vaddvq_u16(bits);
         #elif defined(__wasm__)
@@ -158,8 +158,33 @@ struct NNZInfo {
             }
         #endif
         }
+
+        void record4(SIMD::vec_t n0, SIMD::vec_t n1, SIMD::vec_t n2, SIMD::vec_t n3) {
+        #ifdef USE_NEON
+            alignas(16) static constexpr u16 Mask16[8] = {
+              0x0101, 0x0202, 0x0404, 0x0808, 0x1010, 0x2020, 0x4040, 0x8080};
+
+            const uint16x8_t p01 = vpmaxq_u16(vreinterpretq_u16_s16(n0), vreinterpretq_u16_s16(n1));
+            const uint16x8_t p23 = vpmaxq_u16(vreinterpretq_u16_s16(n2), vreinterpretq_u16_s16(n3));
+
+            const uint16x8_t t01 = vtstq_u16(p01, p01);
+            const uint16x8_t t23 = vtstq_u16(p23, p23);
+
+            const uint8x16_t packed =
+              vtrn1q_u8(vreinterpretq_u8_u16(t01), vreinterpretq_u8_u16(t23));
+            const uint16x8_t bits = vandq_u16(vreinterpretq_u16_u8(packed), vld1q_u16(Mask16));
+
+            const u16 mask = vaddvq_u16(bits);
+            std::memcpy(out, &mask, sizeof(u16));
+            out += 2;
+        #else
+            record2(n0, n1);
+            record2(n2, n3);
+        #endif
+        }
     #elif defined(VECTOR)
         void record2(SIMD::vec_t, SIMD::vec_t) {}
+        void record4(SIMD::vec_t, SIMD::vec_t, SIMD::vec_t, SIMD::vec_t) {}
     #endif
     };
 

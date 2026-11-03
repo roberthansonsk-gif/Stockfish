@@ -283,6 +283,9 @@ class FeatureTransformer {
         const vec_t* in0 = reinterpret_cast<const vec_t*>(&accumulation[0]);
         const vec_t* in1 = reinterpret_cast<const vec_t*>(&accumulation[HalfDimensions / 2]);
         vec_t*       out = reinterpret_cast<vec_t*>(output + offset);
+    #if defined(__aarch64__)
+        asm("" : "+r"(in1));
+    #endif
 
         // Per the NNUE architecture, here we want to multiply pairs of
         // clipped elements and divide the product by 512. To do this,
@@ -316,10 +319,11 @@ class FeatureTransformer {
         // value left by 7, and perform mulhi, which shifts the product
         // right by 16 bits, then we will net a right shift of 9 bits.
 
-        for (IndexType j = 0; j < NumOutputChunks; j += 2)
+        static_assert(NumOutputChunks % 4 == 0);
+        for (IndexType j = 0; j < NumOutputChunks; j += 4)
         {
-            vec_t packed[2];
-            for (IndexType k = 0; k < 2; ++k)
+            vec_t packed[4];
+            for (IndexType k = 0; k < 4; ++k)
             {
                 const IndexType i = (j + k) * 2;
 
@@ -371,7 +375,7 @@ class FeatureTransformer {
                 packed[k] = out[j + k] = result;
             }
 
-            cursor.record2(packed[0], packed[1]);
+            cursor.record4(packed[0], packed[1], packed[2], packed[3]);
         }
 
 #elif defined(USE_RVV)
