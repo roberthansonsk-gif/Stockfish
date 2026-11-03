@@ -263,10 +263,21 @@ ExtMove* MovePicker::generate_and_score() {
 template<typename Pred>
 Move MovePicker::select(Pred filter) {
 
-    for (; cur < endCur; ++cur)
-        if (*cur != ttMove && filter())
-            return *cur++;
+    ExtMove*   c   = cur;
+    ExtMove*   e   = endCur;
+    const Move ttm = ttMove;
 
+    for (; c < e; ++c)
+    {
+        const Move m = *c;
+        if (m != ttm && filter(*c))
+        {
+            cur = c + 1;
+            return m;
+        }
+    }
+
+    cur = c;
     return Move::none();
 }
 
@@ -298,13 +309,13 @@ dispatch:
         goto dispatch;
 
     case GOOD_CAPTURE :
-        if (select([&]() {
-                if (pos.see_ge(*cur, -cur->value / 18))
+        if (Move m = select([&](const ExtMove& em) {
+                if (pos.see_ge(em, -em.value / 18))
                     return true;
-                *endBadMoves++ = *cur;
+                *endBadMoves++ = em;
                 return false;
             }))
-            return *(cur - 1);
+            return m;
 
         endBadCaptures = endBadMoves;
 
@@ -320,13 +331,18 @@ dispatch:
             [[fallthrough]];
 
         case GOOD_QUIET :
-            if (select([&]() {
-                    if (cur->value > goodQuietThreshold)
-                        return true;
-                    *endBadMoves++ = *cur;
-                    return false;
-                }))
-                return *(cur - 1);
+        {
+            ExtMove* bad = endBadMoves;
+            Move     m   = select([&](const ExtMove& em) {
+                if (em.value > goodQuietThreshold)
+                    return true;
+                *bad++ = em;
+                return false;
+            });
+            endBadMoves  = bad;
+            if (m)
+                return m;
+        }
         }
 
         // Prepare the pointers to loop over the bad captures
@@ -339,10 +355,10 @@ dispatch:
     case BAD_MOVES :
     case QSEARCH :
     case EVASION :
-        return select([]() { return true; });
+        return select([](const ExtMove&) { return true; });
 
     case PROBCUT :
-        return select([&]() { return pos.see_ge(*cur, threshold); });
+        return select([&](const ExtMove& em) { return pos.see_ge(em, threshold); });
 
     default :
         assert(false);
