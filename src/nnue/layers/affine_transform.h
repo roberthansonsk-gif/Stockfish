@@ -152,7 +152,7 @@ class AffineTransform {
     static constexpr IndexType get_weight_index_scrambled(IndexType i) {
         IndexType inputIndex = i % PaddedInputDimensions;
 
-#if defined(USE_PAIR_ACTIVATIONS) || defined(USE_LASX)
+#if defined(USE_AVX2) || defined(USE_LASX)
         // At load time, pre-permute the weights to match the per-128-bit-lane interleaving that
         // the previous layer produces, either via SqrClippedReLU::propagate_pair() or via the
         // separate SqrClippedReLU/ClippedReLU propagate() calls, so no shuffle is needed at runtime.
