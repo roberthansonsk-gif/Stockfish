@@ -72,7 +72,8 @@ class SqrClippedReLU {
     // the initial signed 32-to-16-bit saturating narrowing. No shuffle is needed to fix up the
     // pack lane order because the next layer's weights were already reverse pre-permuted to match
     // by AffineTransform::get_weight_index_scrambled().
-    void propagate_pair(const InputType* input, OutputType* squared, OutputType* clipped) const {
+    sf_always_inline void
+    propagate_pair(const InputType* input, OutputType* squared, OutputType* clipped) const {
         static_assert(WeightScaleBitsLocal >= 5 && WeightScaleBitsLocal <= 8,
                       "SqrClippedReLU only support WeightScaleBitsLocal between 5 and 8");
         static_assert(InputDimensions % 32 == 0,
@@ -137,7 +138,7 @@ class SqrClippedReLU {
 
 #if !defined(USE_PAIR_ACTIVATIONS)
     // Forward propagation
-    void propagate(const InputType* input, OutputType* output) const {
+    sf_always_inline void propagate(const InputType* input, OutputType* output) const {
         static_assert(WeightScaleBitsLocal >= 5 && WeightScaleBitsLocal <= 8,
                       "SqrClippedReLU only support WeightScaleBitsLocal between 5 and 8");
         // After squaring we need to shift by WeightScaleBitsLocal * 2 + 7

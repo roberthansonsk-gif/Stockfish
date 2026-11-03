@@ -68,7 +68,7 @@ class ClippedReLU {
 
 #if !defined(USE_PAIR_ACTIVATIONS)
     // Forward propagation
-    void propagate(const InputType* input, OutputType* output) const {
+    sf_always_inline void propagate(const InputType* input, OutputType* output) const {
 
     #if defined(USE_SSE2)
         constexpr IndexType NumChunks = InputDimensions / 16;
