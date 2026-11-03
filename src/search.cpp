@@ -191,17 +191,19 @@ Search::Worker::Worker(SharedState&                   sharedState,
     threads(sharedState.threads),
     tt(sharedState.tt),
     network(sharedState.network),
-    refreshTable(network[token]) {
+    networkPtr(&network[token]),
+    refreshTable(*networkPtr) {
     clear();
 }
 
 void Search::Worker::ensure_network_replicated() {
     // Access once to force lazy initialization, avoiding initialization during search
-    (void) (network[numaAccessToken]);
+    networkPtr = &network[numaAccessToken];
 }
 
 void Search::Worker::start_searching() {
 
+    networkPtr = &network[numaAccessToken];
     accumulatorStack.reset();
 
     // Non-main threads go directly to iterative_deepening()
@@ -733,7 +735,8 @@ void Search::Worker::clear() {
         for (auto& h : to)
             h.fill(5);
 
-    refreshTable.clear(network[numaAccessToken]);
+    networkPtr = &network[numaAccessToken];
+    refreshTable.clear(*networkPtr);
 }
 
 
@@ -1933,7 +1936,7 @@ TimePoint Search::Worker::elapsed() const {
 // Evaluate the current position of the game tree, from the point of view of
 // the side to move.
 Value Search::Worker::evaluate(const Position& pos) {
-    return Eval::evaluate(network[numaAccessToken], pos, accumulatorStack, refreshTable,
+    return Eval::evaluate(*networkPtr, pos, accumulatorStack, refreshTable,
                           optimism[pos.side_to_move()]);
 }
 
