@@ -138,14 +138,14 @@ void partial_insertion_sort(ExtMove* begin, ExtMove* end, int limit) {
 // to decide which class of moves to emit, to help sorting the (presumably)
 // good moves first, and how important move ordering is at the current node.
 
-// MovePicker constructor for the main search and for the quiescence search
+// MovePicker constructor for the main search
 MovePicker::MovePicker(const Position&              p,
                        Move                         ttm,
                        Depth                        d,
                        const ButterflyHistory*      mh,
                        const LowPlyHistory*         lph,
                        const CapturePieceToHistory* cph,
-                       const PieceToHistory**       ch,
+                       const PieceToHistory* const* ch,
                        const SharedHistories*       sh,
                        int                          pl) :
     pos(p),
@@ -158,12 +158,26 @@ MovePicker::MovePicker(const Position&              p,
     depth(d),
     ply(pl) {
 
-    if (pos.checkers())
-        first_stage = EVASION;
-    else
-        first_stage = depth > 0 ? GOOD_CAPTURE : QSEARCH;
+    assert(d > 0);
 
-    stage = ttm && pos.legal(ttm) ? TT : INIT_FIRST_STAGE;
+    first_stage = pos.checkers() ? EVASION : GOOD_CAPTURE;
+    stage       = ttm && pos.legal(ttm) ? TT : INIT_FIRST_STAGE;
+}
+
+// MovePicker constructor for the quiescence search
+MovePicker::MovePicker(const Position&              p,
+                       Move                         ttm,
+                       const ButterflyHistory*      mh,
+                       const CapturePieceToHistory* cph,
+                       const PieceToHistory* const* ch) :
+    pos(p),
+    mainHistory(mh),
+    captureHistory(cph),
+    continuationHistory(ch),
+    ttMove(ttm) {
+
+    first_stage = pos.checkers() ? EVASION : QSEARCH;
+    stage       = ttm && pos.legal(ttm) ? TT : INIT_FIRST_STAGE;
 }
 
 // MovePicker constructor for ProbCut: we generate captures with Static Exchange

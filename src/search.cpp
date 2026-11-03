@@ -1719,17 +1719,13 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
         ss->pv->clear();
     }
 
-    bestMove    = Move::none();
-    ss->inCheck = pos.checkers();
-    moveCount   = 0;
-
     // Used to send selDepth info to GUI (selDepth counts from 1, ply from 0)
     if (PvNode && selDepth < ss->ply + 1)
         selDepth = ss->ply + 1;
 
     // Step 2. Check for an immediate draw or maximum ply reached
     if (pos.is_draw(ss->ply) || ss->ply >= MAX_PLY)
-        return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : VALUE_DRAW;
+        return (ss->ply >= MAX_PLY && !pos.checkers()) ? evaluate(pos) : VALUE_DRAW;
 
     assert(0 <= ss->ply && ss->ply < MAX_PLY);
 
@@ -1738,14 +1734,14 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     auto [ttHit, ttData, ttWriter] = tt.probe(posKey);
 
     ss->ttHit    = ttHit;
-    ttData.move  = ttHit ? ttData.move : Move::none();
     ttData.value = ttHit ? value_from_tt(ttData.value, ss->ply, pos.rule50_count()) : VALUE_NONE;
-    pvHit        = ttHit && ttData.is_pv;
 
     // At non-PV nodes we check for an early TT cutoff
     if (!PvNode && ttData.depth >= DEPTH_QS && is_valid(ttData.value)
         && (ttData.bound & (ttData.value >= beta ? BOUND_LOWER : BOUND_UPPER)))
         return ttData.value;
+
+    ss->inCheck = pos.checkers();
 
     // Step 4. Static evaluation of the position
     Value unadjustedStaticEval = VALUE_NONE;
@@ -1796,15 +1792,17 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
         futilityBase = ss->staticEval + 306;
     }
 
-    const PieceToHistory* contHist[] = {(ss - 1)->continuationHistory};
+    bestMove    = Move::none();
+    moveCount   = 0;
+    ttData.move = ttHit ? ttData.move : Move::none();
+    pvHit       = ttHit && ttData.is_pv;
 
     Square prevSq = ((ss - 1)->currentMove).is_ok() ? ((ss - 1)->currentMove).to_sq() : SQ_NONE;
 
     // Initialize a MovePicker object for the current position, and prepare
     // to search the moves. We presently use two stages of move generator in
     // quiescence search: captures, or evasions only when in check.
-    MovePicker mp(pos, ttData.move, DEPTH_QS, &mainHistory, &lowPlyHistory, &captureHistory,
-                  contHist, &sharedHistory, ss->ply);
+    MovePicker mp(pos, ttData.move, &mainHistory, &captureHistory, &(ss - 1)->continuationHistory);
 
     // Step 5. Loop through all legal moves until no moves remain
     // or a beta cutoff occurs.
@@ -1812,46 +1810,55 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     {
         assert(move.is_ok());
 
-        givesCheck = pos.gives_check(move);
-        capture    = pos.capture_stage(move);
-
         moveCount++;
 
         // Step 6. Pruning
         if (!is_loss(bestValue))
         {
             // Futility pruning and moveCount pruning
-            if (!givesCheck && move.to_sq() != prevSq && !is_loss(futilityBase)
-                && move.type_of() != PROMOTION)
+            if (!ss->inCheck && move.to_sq() != prevSq && move.type_of() != PROMOTION)
             {
-                if (moveCount > 2)
-                    continue;
-
-                Value futilityValue = futilityBase + PieceValue[pos.piece_on(move.to_sq())];
-
-                // If static eval + value of piece we are going to capture is
-                // much lower than alpha, we can prune this move.
-                if (futilityValue <= alpha)
+                givesCheck = pos.gives_check(move);
+                if (!givesCheck)
                 {
-                    bestValue = std::max(bestValue, futilityValue);
-                    continue;
+                    if (moveCount > 2)
+                        continue;
+
+                    Value futilityValue = futilityBase + PieceValue[pos.piece_on(move.to_sq())];
+
+                    // If static eval + value of piece we are going to capture is
+                    // much lower than alpha, we can prune this move.
+                    if (futilityValue <= alpha)
+                    {
+                        bestValue = std::max(bestValue, futilityValue);
+                        continue;
+                    }
+
+                    // If static exchange evaluation is low enough, we can prune
+                    if (!pos.see_ge(move, alpha - futilityBase))
+                    {
+                        bestValue = std::max(bestValue, std::min(alpha, futilityBase));
+                        continue;
+                    }
                 }
 
-                // If static exchange evaluation is low enough, we can prune
-                if (!pos.see_ge(move, alpha - futilityBase))
-                {
-                    bestValue = std::max(bestValue, std::min(alpha, futilityBase));
+                capture = pos.capture_stage(move);
+                if (!capture || !pos.see_ge(move, -74))
                     continue;
-                }
             }
+            else
+            {
+                capture = pos.capture_stage(move);
+                if (!capture || !pos.see_ge(move, -74))
+                    continue;
 
-            // Skip non-captures
-            if (!capture)
-                continue;
-
-            // Do not search moves with bad enough SEE values
-            if (!pos.see_ge(move, -74))
-                continue;
+                givesCheck = pos.gives_check(move);
+            }
+        }
+        else
+        {
+            capture    = pos.capture_stage(move);
+            givesCheck = pos.gives_check(move);
         }
 
         // Step 7. Make and search the move
