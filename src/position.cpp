@@ -1154,13 +1154,11 @@ constexpr bool can_slider_threat(Piece pc, Piece slider) {
     return type_of(pc) != QUEEN || type_of(slider) == QUEEN;
 }
 
-template<bool ComputeRay>
 void Position::update_piece_threats(Piece               pc,
                                     bool                putPiece,
                                     Square              s,
                                     DirtyThreats* const dts,
-                                    // Silence spurious warning on GCC 10
-                                    [[maybe_unused]] Bitboard noRaysContaining) const {
+                                    Bitboard            noRaysContaining) const {
     const Bitboard occupied         = pieces();
     const auto [bAttacks, rAttacks] = both_attacks_bb(s, occupied);
     const Bitboard  sliderAttacks   = bAttacks | rAttacks;
@@ -1168,40 +1166,31 @@ void Position::update_piece_threats(Piece               pc,
     const PieceType pt              = type_of(pc);
     const Bitboard  sliders = (pieces(BISHOP, QUEEN) & bAttacks) | (pieces(ROOK, QUEEN) & rAttacks);
 
-    auto process_sliders = [&](bool addDirectAttacks) {
-        Bitboard b = sliders;
+    Bitboard       b                 = sliders & ~noRaysContaining;
+    const Bitboard discoveredTargets = sliderAttacks & occupiedNoK;
+    if (discoveredTargets)
         while (b)
         {
-            Square sliderSq = pop_lsb(b);
-            Piece  slider   = piece_on(sliderSq);
-
-            const Bitboard ray        = ray_pass_bb(sliderSq, s);
-            const Bitboard discovered = ray & sliderAttacks & occupiedNoK;
+            Square         sliderSq   = pop_lsb(b);
+            const Bitboard discovered = ray_pass_bb(sliderSq, s) & discoveredTargets;
 
             assert(!more_than_one(discovered));
-            if (discovered && (ray & noRaysContaining) != noRaysContaining)
+            if (discovered)
             {
+                Piece        slider       = piece_on(sliderSq);
                 const Square threatenedSq = lsb(discovered);
                 const Piece  threatenedPc = piece_on(threatenedSq);
                 if (can_slider_threat(threatenedPc, slider))
                     add_dirty_threat(dts, !putPiece, slider, threatenedPc, sliderSq, threatenedSq);
             }
-
-            if (addDirectAttacks && can_slider_threat(pc, slider))
-                add_dirty_threat(dts, putPiece, slider, pc, sliderSq, s);
         }
-    };
 
     // Kings emit no direct threats
     if (pt == KING)
-    {
-        if constexpr (ComputeRay)
-            process_sliders(false);
         return;
-    }
 
     const Bitboard threatTargets = pt == PAWN                 ? pieces(KNIGHT, ROOK)
-                                 : pt == BISHOP || pt == ROOK ? pieces(PAWN, KNIGHT, BISHOP, ROOK)
+                                 : pt == BISHOP || pt == ROOK ? (occupiedNoK ^ pieces(QUEEN))
                                                               : occupiedNoK;
     Bitboard       threatened    = (pt == BISHOP  ? bAttacks
                                     : pt == ROOK  ? rAttacks
@@ -1209,7 +1198,8 @@ void Position::update_piece_threats(Piece               pc,
                                     : pt == PAWN  ? PseudoAttacks[color_of(pc)][s]
                                                   : PseudoAttacks[pt][s])
                         & threatTargets;
-    Bitboard incomingThreats = PseudoAttacks[KNIGHT][s] & pieces(KNIGHT);
+    Bitboard incomingThreats =
+      (PseudoAttacks[KNIGHT][s] & pieces(KNIGHT)) | (pt == QUEEN ? sliders & pieces(QUEEN) : sliders);
 
     if (pt == KNIGHT || pt == ROOK)
         incomingThreats |= (attacks_bb(PAWN, s, WHITE) & pieces(BLACK, PAWN))
@@ -1219,13 +1209,8 @@ void Position::update_piece_threats(Piece               pc,
     write_multiple_dirties<DirtyThreat::ThreatenedSqOffset, DirtyThreat::ThreatenedPcOffset>(
       *this, threatened, {pc, NO_PIECE, s, Square(0), putPiece}, dts);
 
-    const Bitboard directSliders = pt == QUEEN ? sliders & pieces(QUEEN) : sliders;
     write_multiple_dirties<DirtyThreat::PcSqOffset, DirtyThreat::PcOffset>(
-      *this, directSliders | incomingThreats, {NO_PIECE, pc, Square(0), s, putPiece}, dts);
-
-    // For ICL, direct threats were written above
-    if constexpr (ComputeRay)
-        process_sliders(false);
+      *this, incomingThreats, {NO_PIECE, pc, Square(0), s, putPiece}, dts);
 #else
     while (threatened)
     {
@@ -1237,11 +1222,6 @@ void Position::update_piece_threats(Piece               pc,
         add_dirty_threat(dts, putPiece, pc, threatenedPc, s, threatenedSq);
     }
 
-    if constexpr (ComputeRay)
-        process_sliders(true);
-    else
-        incomingThreats |= pt == QUEEN ? sliders & pieces(QUEEN) : sliders;
-
     while (incomingThreats)
     {
         Square srcSq = pop_lsb(incomingThreats);
@@ -1252,6 +1232,78 @@ void Position::update_piece_threats(Piece               pc,
         add_dirty_threat(dts, putPiece, srcPc, pc, srcSq, s);
     }
 #endif
+}
+
+void Position::update_swap_threats(Piece               oldPc,
+                                   Piece               newPc,
+                                   Square              s,
+                                   DirtyThreats* const dts) const {
+    const Bitboard occupied      = pieces();
+    const auto     brAttacks     = both_attacks_bb(s, occupied);
+    const Bitboard bAttacks      = brAttacks.first;
+    const Bitboard rAttacks      = brAttacks.second;
+    const Bitboard sliderAttacks = bAttacks | rAttacks;
+    const Bitboard occupiedNoK   = occupied ^ pieces(KING);
+    const Bitboard noQueen       = occupiedNoK ^ pieces(QUEEN);
+    const Bitboard sliders =
+      (pieces(BISHOP, QUEEN) & bAttacks) | (pieces(ROOK, QUEEN) & rAttacks);
+    const Bitboard knightIncoming = PseudoAttacks[KNIGHT][s] & pieces(KNIGHT);
+    const Bitboard pawnIncoming =
+      (type_of(oldPc) == KNIGHT || type_of(oldPc) == ROOK || type_of(newPc) == KNIGHT
+       || type_of(newPc) == ROOK)
+        ? (attacks_bb(PAWN, s, WHITE) & pieces(BLACK, PAWN))
+            | (attacks_bb(PAWN, s, BLACK) & pieces(WHITE, PAWN))
+        : 0;
+
+    auto emit = [&](Piece pc, bool putPiece) {
+        const PieceType pt            = type_of(pc);
+        const Bitboard  threatTargets = pt == PAWN                 ? pieces(KNIGHT, ROOK)
+                                      : pt == BISHOP || pt == ROOK ? noQueen
+                                                                   : occupiedNoK;
+        Bitboard        threatened    = (pt == BISHOP  ? bAttacks
+                                         : pt == ROOK  ? rAttacks
+                                         : pt == QUEEN ? sliderAttacks
+                                         : pt == PAWN  ? PseudoAttacks[color_of(pc)][s]
+                                                       : PseudoAttacks[pt][s])
+                            & threatTargets;
+        Bitboard incomingThreats =
+          knightIncoming | (pt == QUEEN ? sliders & pieces(QUEEN) : sliders);
+
+        if (pt == KNIGHT || pt == ROOK)
+            incomingThreats |= pawnIncoming;
+
+#ifdef USE_AVX512ICL
+        write_multiple_dirties<DirtyThreat::ThreatenedSqOffset, DirtyThreat::ThreatenedPcOffset>(
+          *this, threatened, {pc, NO_PIECE, s, Square(0), putPiece}, dts);
+
+        write_multiple_dirties<DirtyThreat::PcSqOffset, DirtyThreat::PcOffset>(
+          *this, incomingThreats, {NO_PIECE, pc, Square(0), s, putPiece}, dts);
+#else
+        while (threatened)
+        {
+            Square threatenedSq = pop_lsb(threatened);
+            Piece  threatenedPc = piece_on(threatenedSq);
+            assert(threatenedSq != s);
+            assert(threatenedPc != NO_PIECE);
+
+            add_dirty_threat(dts, putPiece, pc, threatenedPc, s, threatenedSq);
+        }
+
+        while (incomingThreats)
+        {
+            Square srcSq = pop_lsb(incomingThreats);
+            Piece  srcPc = piece_on(srcSq);
+            assert(srcSq != s);
+            assert(srcPc != NO_PIECE);
+
+            add_dirty_threat(dts, putPiece, srcPc, pc, srcSq, s);
+        }
+#endif
+    };
+
+    emit(oldPc, false);
+    if (type_of(newPc) != KING)
+        emit(newPc, true);
 }
 
 Key Position::prefetch_key(Move m) const {

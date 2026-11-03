@@ -195,12 +195,12 @@ class Position {
     void compute_threats() const;
 
     // Other helpers
-    template<bool ComputeRay = true>
     void update_piece_threats(Piece               pc,
                               bool                putPiece,
                               Square              s,
                               DirtyThreats* const dts,
-                              Bitboard            noRaysContaining = -1ULL) const;
+                              Bitboard            noRaysContaining = 0) const;
+    void update_swap_threats(Piece oldPc, Piece newPc, Square s, DirtyThreats* const dts) const;
     void move_piece(Square from, Square to, DirtyThreats* const dts = nullptr);
     template<bool Do>
     void do_castling(Color               us,
@@ -408,11 +408,12 @@ inline void Position::remove_piece(Square s, DirtyThreats* const dts) {
 }
 
 inline void Position::move_piece(Square from, Square to, DirtyThreats* const dts) {
-    Piece    pc     = board[from];
-    Bitboard fromTo = from | to;
+    Piece    pc            = board[from];
+    Bitboard fromTo        = from | to;
+    Bitboard bannedSliders = dts ? Attacks::line_bb(from, to) : 0;
 
     if (dts)
-        update_piece_threats(pc, false, from, dts, fromTo);
+        update_piece_threats(pc, false, from, dts, bannedSliders);
 
     byTypeBB[ALL_PIECES] ^= fromTo;
     byTypeBB[type_of(pc)] ^= fromTo;
@@ -421,21 +422,24 @@ inline void Position::move_piece(Square from, Square to, DirtyThreats* const dts
     board[to]   = pc;
 
     if (dts)
-        update_piece_threats(pc, true, to, dts, fromTo);
+        update_piece_threats(pc, true, to, dts, bannedSliders);
 }
 
 inline void Position::swap_piece(Square s, Piece pc, DirtyThreats* const dts) {
     Piece old = board[s];
 
-    remove_piece(s);
+    byTypeBB[type_of(old)] ^= s;
+    byTypeBB[type_of(pc)] ^= s;
+    byColorBB[color_of(old)] ^= s;
+    byColorBB[color_of(pc)] ^= s;
+    board[s] = pc;
+    pieceCount[old]--;
+    pieceCount[make_piece(color_of(old), ALL_PIECES)]--;
+    pieceCount[pc]++;
+    pieceCount[make_piece(color_of(pc), ALL_PIECES)]++;
 
     if (dts)
-        update_piece_threats<false>(old, false, s, dts);
-
-    put_piece(pc, s);
-
-    if (dts)
-        update_piece_threats<false>(pc, true, s, dts);
+        update_swap_threats(old, pc, s, dts);
 }
 
 inline void Position::do_move(Move m, StateInfo& newSt) {
