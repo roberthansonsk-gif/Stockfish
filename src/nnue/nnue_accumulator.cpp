@@ -419,12 +419,37 @@ template<int sign>
 sf_always_inline Tile apply_feature_pair(Tile acc, const i8* data0, const i8* data1) {
     static_assert(sign == 1 || sign == -1);
     static_assert(Tiling::NumRegs % 2 == 0);
+        #if defined(USE_NEON)
+            #if defined(__clang__)
+                #pragma clang loop unroll(full)
+            #elif defined(__GNUC__)
+                #pragma GCC unroll(Tiling::NumRegs / 2)
+            #endif
+    for (IndexType k = 0; k < Tiling::NumRegs; k += 2)
+    {
+        const int8x16_t w0 = reinterpret_cast<const int8x16_t*>(data0)[k / 2];
+        const int8x16_t w1 = reinterpret_cast<const int8x16_t*>(data1)[k / 2];
+        const vec_t     lo = vaddl_s8(vget_low_s8(w0), vget_low_s8(w1));
+        const vec_t     hi = vaddl_high_s8(w0, w1);
+        if constexpr (sign == +1)
+        {
+            acc[k]     = vec_add_16(acc[k], lo);
+            acc[k + 1] = vec_add_16(acc[k + 1], hi);
+        }
+        else
+        {
+            acc[k]     = vec_sub_16(acc[k], lo);
+            acc[k + 1] = vec_sub_16(acc[k + 1], hi);
+        }
+    }
+    return acc;
+        #else
     const vec_t ones = vec_set_8(1);
-        #if defined(__clang__)
-            #pragma clang loop unroll(full)
-        #elif defined(__GNUC__)
-            #pragma GCC unroll(Tiling::NumRegs / 2)
-        #endif
+            #if defined(__clang__)
+                #pragma clang loop unroll(full)
+            #elif defined(__GNUC__)
+                #pragma GCC unroll(Tiling::NumRegs / 2)
+            #endif
     for (IndexType k = 0; k < Tiling::NumRegs; k += 2)
     {
         const vec_t w0 = vec_load(reinterpret_cast<const vec_t*>(data0) + k / 2);
@@ -443,6 +468,7 @@ sf_always_inline Tile apply_feature_pair(Tile acc, const i8* data0, const i8* da
         }
     }
     return acc;
+        #endif
 }
 
     #endif
@@ -462,12 +488,16 @@ apply_features(IndexType j, Tile acc, const u16* indices, int count, const i8* w
         if (count == 2)
             return apply_feature_pair<sign>(acc, &weights[usize(indices[0]) * Dimensions],
                                             &weights[usize(indices[1]) * Dimensions]);
-    #endif
+        if (count > 0)
+            acc = apply_feature_single<sign>(j, acc, &weights[usize(indices[0]) * Dimensions]);
+        return acc;
+    #else
         if (count > 0)
             acc = apply_feature_single<sign>(j, acc, &weights[usize(indices[0]) * Dimensions]);
         if (count > 1)
             acc = apply_feature_single<sign>(j, acc, &weights[usize(indices[1]) * Dimensions]);
         return acc;
+    #endif
 #endif
     }
 
@@ -543,6 +573,55 @@ void apply_combined(Color                              perspective,
     const auto& fromAcc = from.accumulation[perspective];
     auto&       toAcc   = to.accumulation[perspective];
 
+#if defined(USE_PAIRED_WIDENING_ADD)
+    assert(psqRemoved.size() == 1 || psqRemoved.size() == 2);
+    assert(psqAdded.size() == 1 || psqAdded.size() == 2);
+
+    const WeightType* const thrBase = &featureTransformer.threatAndPpWeights[0];
+
+    const WeightType* const rem0    = &psqWeights[usize(psqRemoved[0]) * Dimensions];
+    const WeightType*       rem1    = nullptr;
+    const u16*              thrRem  = thrRemoved.begin();
+    int                     thrRemN = thrRemoved.ssize();
+    if (psqRemoved.size() == 2)
+        rem1 = &psqWeights[usize(psqRemoved[1]) * Dimensions];
+    else if (thrRemN > 0)
+    {
+        rem1 = &thrBase[usize(thrRem[0]) * Dimensions];
+        ++thrRem;
+        --thrRemN;
+    }
+
+    const WeightType* const add0    = &psqWeights[usize(psqAdded[0]) * Dimensions];
+    const WeightType*       add1    = nullptr;
+    const u16*              thrAdd  = thrAdded.begin();
+    int                     thrAddN = thrAdded.ssize();
+    if (psqAdded.size() == 2)
+        add1 = &psqWeights[usize(psqAdded[1]) * Dimensions];
+    else if (thrAddN > 0)
+    {
+        add1 = &thrBase[usize(thrAdd[0]) * Dimensions];
+        ++thrAdd;
+        --thrAddN;
+    }
+
+    Tile acc;
+
+    for (IndexType j = 0; j < Dimensions; increment_index(j))
+    {
+        acc = load_tile(j, fromAcc.data());
+
+        acc = rem1 ? apply_feature_pair<-1>(acc, &rem0[j], &rem1[j])
+                   : apply_feature_single<-1>(j, acc, &rem0[j]);
+        acc = apply_features<-1>(j, acc, thrRem, thrRemN, &thrBase[j]);
+
+        acc = add1 ? apply_feature_pair<+1>(acc, &add0[j], &add1[j])
+                   : apply_feature_single<+1>(j, acc, &add0[j]);
+        acc = apply_features<+1>(j, acc, thrAdd, thrAddN, &thrBase[j]);
+
+        store_tile(j, toAcc.data(), acc);
+    }
+#else
     Tile acc;
 
     for (IndexType j = 0; j < Dimensions; increment_index(j))
@@ -556,6 +635,7 @@ void apply_combined(Color                              perspective,
 
         store_tile(j, toAcc.data(), acc);
     }
+#endif
 }
 
 template<bool Forward>

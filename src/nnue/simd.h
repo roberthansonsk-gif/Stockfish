@@ -60,7 +60,7 @@ namespace Stockfish::Eval::NNUE::SIMD {
 // instead of one sign-extension per row. See apply_feature_pair() in
 // nnue_accumulator.cpp and FeatureTransformer::WideningPairOrder.
 // Not used on wasm: emscripten emulates maddubs with several instructions.
-#if defined(USE_SSSE3) && !defined(__wasm__)
+#if (defined(USE_SSSE3) && !defined(__wasm__)) || defined(USE_NEON)
     #define USE_PAIRED_WIDENING_ADD
 #endif
 
