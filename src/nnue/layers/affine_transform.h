@@ -206,6 +206,13 @@ class AffineTransform {
     // Forward propagation
     void propagate(const InputType* input, OutputType* output) const {
 
+        const WeightType* weights_cp = weights;
+#if defined(__aarch64__)
+        asm("" : "+r"(weights_cp));
+#endif
+        const BiasType* biases_cp = reinterpret_cast<const BiasType*>(
+          weights_cp - (offsetof(AffineTransform, weights) - offsetof(AffineTransform, biases)));
+
 #ifdef ENABLE_SEQ_OPT
 
         if constexpr (OutputDimensions > 1)
@@ -256,13 +263,13 @@ class AffineTransform {
             constexpr IndexType NumChunks = ceil_to_multiple<IndexType>(InputDimensions, 8) / 4;
             constexpr IndexType NumAccums = OutputDimensions / OutputSimdWidth;
 
-    #if defined(USE_VNNI) || defined(USE_NEON_DOTPROD)
+    #if defined(USE_VNNI)
             constexpr IndexType NumRegs = 2 * NumAccums;
     #else
             constexpr IndexType NumRegs = NumAccums;
     #endif
 
-            const vec_t* biasvec = reinterpret_cast<const vec_t*>(biases);
+            const vec_t* biasvec = reinterpret_cast<const vec_t*>(biases_cp);
             vec_t        acc[NumRegs];
             for (IndexType k = 0; k < NumAccums; ++k)
                 acc[k] = biasvec[k];
@@ -270,15 +277,60 @@ class AffineTransform {
                 acc[k] = vec_set_32(0);
 
             IndexType i = 0;
-    #if defined(USE_VNNI) || defined(USE_NEON_DOTPROD)
+    #if defined(USE_NEON_DOTPROD)
+            const auto* inVec = reinterpret_cast<const int8x16_t*>(input);
+            for (; i + 3 < NumChunks; i += 4)
+            {
+                const WeightType* colBase =
+                  &weights_cp[(i & ~IndexType(7)) * OutputDimensions * 4];
+        #if defined(__aarch64__)
+                asm("" : "+r"(colBase));
+        #endif
+                const IndexType rem    = i & 7;
+                const int8x16_t in0123 = inVec[i / 4];
+                const auto      col0   = reinterpret_cast<const int8x16_t*>(
+                  &colBase[(rem + 0) * OutputDimensions * 4]);
+                const auto col1 = reinterpret_cast<const int8x16_t*>(
+                  &colBase[(rem + 1) * OutputDimensions * 4]);
+                const auto col2 = reinterpret_cast<const int8x16_t*>(
+                  &colBase[(rem + 2) * OutputDimensions * 4]);
+                const auto col3 = reinterpret_cast<const int8x16_t*>(
+                  &colBase[(rem + 3) * OutputDimensions * 4]);
+
+                for (IndexType k = 0; k < NumAccums; k += 2)
+                {
+                    const int8x16_t w0 = col0[k + 0], w1 = col0[k + 1];
+                    acc[k + 0] = vdotq_laneq_s32(acc[k + 0], w0, in0123, 0);
+                    acc[k + 1] = vdotq_laneq_s32(acc[k + 1], w1, in0123, 0);
+                }
+                for (IndexType k = 0; k < NumAccums; k += 2)
+                {
+                    const int8x16_t w0 = col1[k + 0], w1 = col1[k + 1];
+                    acc[k + 0] = vdotq_laneq_s32(acc[k + 0], w0, in0123, 1);
+                    acc[k + 1] = vdotq_laneq_s32(acc[k + 1], w1, in0123, 1);
+                }
+                for (IndexType k = 0; k < NumAccums; k += 2)
+                {
+                    const int8x16_t w0 = col2[k + 0], w1 = col2[k + 1];
+                    acc[k + 0] = vdotq_laneq_s32(acc[k + 0], w0, in0123, 2);
+                    acc[k + 1] = vdotq_laneq_s32(acc[k + 1], w1, in0123, 2);
+                }
+                for (IndexType k = 0; k < NumAccums; k += 2)
+                {
+                    const int8x16_t w0 = col3[k + 0], w1 = col3[k + 1];
+                    acc[k + 0] = vdotq_laneq_s32(acc[k + 0], w0, in0123, 3);
+                    acc[k + 1] = vdotq_laneq_s32(acc[k + 1], w1, in0123, 3);
+                }
+            }
+    #elif defined(USE_VNNI)
             for (; i < NumChunks; i += 2)
             {
                 const vec_t in0 = vec_load_32(input + i * sizeof(i32));
                 const vec_t in1 = vec_load_32(input + (i + 1) * sizeof(i32));
                 const auto  col0 =
-                  reinterpret_cast<const vec_t*>(&weights[i * OutputDimensions * 4]);
+                  reinterpret_cast<const vec_t*>(&weights_cp[i * OutputDimensions * 4]);
                 const auto col1 =
-                  reinterpret_cast<const vec_t*>(&weights[(i + 1) * OutputDimensions * 4]);
+                  reinterpret_cast<const vec_t*>(&weights_cp[(i + 1) * OutputDimensions * 4]);
 
                 for (IndexType k = 0; k < NumAccums; ++k)
                 {
@@ -288,17 +340,13 @@ class AffineTransform {
             }
 
             for (IndexType k = 0; k < NumAccums; ++k)
-        #if defined(USE_NEON_DOTPROD)
-                acc[k] = vaddq_s32(acc[k], acc[k + NumAccums]);
-        #else
                 acc[k] = vec_add_32(acc[k], acc[k + NumAccums]);
-        #endif
     #endif
             for (; i < NumChunks; ++i)
             {
                 const vec_t in0 = vec_load_32(input + i * sizeof(i32));
                 const auto  col0 =
-                  reinterpret_cast<const vec_t*>(&weights[i * OutputDimensions * 4]);
+                  reinterpret_cast<const vec_t*>(&weights_cp[i * OutputDimensions * 4]);
 
                 for (IndexType k = 0; k < NumAccums; ++k)
                     vec_add_dpbusd_32(acc[k], in0, col0[k]);
@@ -351,14 +399,22 @@ class AffineTransform {
 
             constexpr IndexType NumChunks = PaddedInputDimensions / InputSimdWidth;
             vec_t               sum0      = vec_setzero();
-            const auto          row0      = reinterpret_cast<const vec_t*>(&weights[0]);
+            const auto          row0      = reinterpret_cast<const vec_t*>(&weights_cp[0]);
 
-            for (int j = 0; j < int(NumChunks); ++j)
+            int j = 0;
+            for (; j + 1 < int(NumChunks); j += 2)
+            {
+                const vec_t in0 = inputVector[j + 0], in1 = inputVector[j + 1];
+                const vec_t w0  = row0[j + 0],        w1  = row0[j + 1];
+                vec_add_dpbusd_32(sum0, in0, w0);
+                vec_add_dpbusd_32(sum0, in1, w1);
+            }
+            for (; j < int(NumChunks); ++j)
             {
                 const vec_t in = inputVector[j];
                 vec_add_dpbusd_32(sum0, in, row0[j]);
             }
-            output[0] = vec_hadd(sum0, biases[0]);
+            output[0] = vec_hadd(sum0, biases_cp[0]);
 
     #undef vec_setzero
     #undef vec_add_dpbusd_32
