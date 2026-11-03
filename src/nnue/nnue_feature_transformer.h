@@ -280,9 +280,9 @@ class FeatureTransformer {
         [[maybe_unused]] const vec_t   FtMax = vec_set_16(FtMaxVal);
         [[maybe_unused]] constexpr int shift = 7;
 
-        const vec_t* in0 = reinterpret_cast<const vec_t*>(&accumulation[0]);
-        const vec_t* in1 = reinterpret_cast<const vec_t*>(&accumulation[HalfDimensions / 2]);
-        vec_t*       out = reinterpret_cast<vec_t*>(output + offset);
+        constexpr IndexType HalfVecs = (HalfDimensions / 2) / (sizeof(vec_t) / sizeof(BiasType));
+        const vec_t*        inMid = reinterpret_cast<const vec_t*>(&accumulation[HalfDimensions / 2]);
+        vec_t*              out   = reinterpret_cast<vec_t*>(output + offset);
 
         // Per the NNUE architecture, here we want to multiply pairs of
         // clipped elements and divide the product by 512. To do this,
@@ -323,10 +323,10 @@ class FeatureTransformer {
             {
                 const IndexType i = (j + k) * 2;
 
-                vec_t acc0a = in0[i + 0];
-                vec_t acc0b = in0[i + 1];
-                vec_t acc1a = in1[i + 0];
-                vec_t acc1b = in1[i + 1];
+                vec_t acc0a = inMid[int(i) - int(HalfVecs) + 0];
+                vec_t acc0b = inMid[int(i) - int(HalfVecs) + 1];
+                vec_t acc1a = inMid[i + 0];
+                vec_t acc1b = inMid[i + 1];
 
                 static_assert(FtMaxVal == 255);
 
