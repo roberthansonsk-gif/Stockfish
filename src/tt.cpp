@@ -66,12 +66,14 @@ struct TTEntry {
     // Extract data from the TT entry. We have to convert TT internal bitfields
     // to external types.
     TTData read() const {
+        const u8 d8  = depth8;
+        const u8 gb8 = genBound8;
         return TTData{Move(move16),
                       Value(value16),
                       Value(eval16),
-                      Depth(DEPTH_NONE + depth8),
-                      Bound((genBound8 & BOUND_MASK) >> BOUND_SHIFT),
-                      bool(genBound8 & PV_MASK)};
+                      Depth(DEPTH_NONE + d8),
+                      Bound((gb8 & BOUND_MASK) >> BOUND_SHIFT),
+                      bool(gb8 & PV_MASK)};
     }
 
     // Check if the TT entry is occupied
@@ -116,24 +118,28 @@ constexpr u64 MASK21 = (1ULL << KeyBits) - 1;
 void          TTWriter::write(
   Key k, Value v, bool pv, Bound b, Depth d, Move m, Value ev, u8 curr_generation) {
 
-    u64        keys  = cluster->keys;
-    const auto key21 = keys >> KeyBits * index & MASK21;
-    auto&      entry = cluster->entry[index];
+    const int  shift    = KeyBits * index;
+    const u64  k21      = k & MASK21;
+    u64        keys     = cluster->keys;
+    const bool sameKey  = ((keys >> shift) & MASK21) == k21;
+    auto&      entry    = cluster->entry[index];
 
     // Preserve the old ttmove if we don't have a new one
-    if (m || (k & MASK21) != key21)
+    if (m || !sameKey)
         entry.move16 = m;
 
+    u8 oldDepth8 = 0;
+
     // Overwrite less valuable entries (cheapest checks first)
-    if (b == BOUND_EXACT || (k & MASK21) != key21 || d - DEPTH_NONE + 2 * pv > entry.depth8 - 4
+    if (b == BOUND_EXACT || !sameKey || d - DEPTH_NONE + 2 * pv > (oldDepth8 = entry.depth8) - 4
         || entry.relative_age(curr_generation))
     {
         assert(d > DEPTH_NONE);
         assert(d - DEPTH_NONE < 256);
         assert(curr_generation <= GENERATION_MASK);  // TT::new_search() plays nice
 
-        keys &= ~(MASK21 << (KeyBits * index));
-        keys |= (k & MASK21) << (KeyBits * index);
+        keys &= ~(MASK21 << shift);
+        keys |= k21 << shift;
         cluster->keys   = keys;
         entry.depth8    = u8(d - DEPTH_NONE);
         entry.genBound8 = u8(curr_generation | b << BOUND_SHIFT | u8(pv) << PV_SHIFT);
@@ -144,14 +150,14 @@ void          TTWriter::write(
     // Secondary aging. Important for elementary mate finding.
     // (*Scaler) Secondary aging on entries relevant to singular extensions
     // generally scales poorly and requires VVLTC verification.
-    else if (entry.depth8 + DEPTH_NONE >= 5
+    else if (oldDepth8 + DEPTH_NONE >= 5
              && Bound((entry.genBound8 & BOUND_MASK) >> BOUND_SHIFT) != BOUND_EXACT)
     {
         auto v16 = entry.value16;
 
         // Guard against racy underflows, default to "unoccupied"
         if (std::abs(v16) < VALUE_INFINITE && is_decisive(v16))
-            entry.depth8 = std::max(int(entry.depth8) - 1, 0);
+            entry.depth8 = std::max(int(oldDepth8) - 1, 0);
     }
 }
 
@@ -285,18 +291,26 @@ std::tuple<bool, TTData, TTWriter> TranspositionTable::probe(const Key key) cons
 
     if (matches)
     {
-        const int i = int(lsb(matches)) / KeyBits;
+        const int i = (int(lsb(matches)) >> 4) - 1;
         // This gap is the main place for read races.
         // After `read()` completes that copy is final, but may be self-inconsistent.
-        return {tte[i].is_occupied(), tte[i].read(), TTWriter(cluster, i)};
+        const TTData data = tte[i].read();
+        return {data.depth > DEPTH_NONE, data, TTWriter(cluster, i)};
     }
 
     // Find an entry to be replaced according to the replacement strategy
-    int replace = 0;
+    const u8 gen8      = generation8;
+    int      replace   = 0;
+    int      bestScore = tte[0].depth8 - 8 * tte[0].relative_age(gen8);
     for (int i = 1; i < ClusterSize; ++i)
-        if (tte[replace].depth8 - 8 * tte[replace].relative_age(generation8)
-            > tte[i].depth8 - 8 * tte[i].relative_age(generation8))
-            replace = i;
+    {
+        const int score = tte[i].depth8 - 8 * tte[i].relative_age(gen8);
+        if (bestScore > score)
+        {
+            bestScore = score;
+            replace   = i;
+        }
+    }
 
     return {false, TTData{Move::none(), VALUE_NONE, VALUE_NONE, DEPTH_NONE, BOUND_NONE, false},
             TTWriter(cluster, replace)};
