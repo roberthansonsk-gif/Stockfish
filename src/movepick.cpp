@@ -193,66 +193,93 @@ ExtMove* MovePicker::generate_and_score() {
     [[maybe_unused]] Bitboard threatByLesser[KING + 1];
     if constexpr (Type == QUIETS)
     {
+        const Bitboard pawnThreats = pos.threats_by(PAWN);
+        const auto&    threats     = pos.state()->threats;
+
         threatByLesser[PAWN]   = 0;
-        threatByLesser[KNIGHT] = threatByLesser[BISHOP] = pos.threats_by(PAWN);
-        threatByLesser[ROOK] =
-          pos.threats_by(KNIGHT) | pos.threats_by(BISHOP) | threatByLesser[KNIGHT];
-        threatByLesser[QUEEN] = pos.threats_by(ROOK) | threatByLesser[ROOK];
-        threatByLesser[KING]  = 0;
+        threatByLesser[KNIGHT] = threatByLesser[BISHOP] = pawnThreats;
+        threatByLesser[ROOK]   = threats[KNIGHT] | threats[BISHOP] | pawnThreats;
+        threatByLesser[QUEEN]  = threats[ROOK] | threatByLesser[ROOK];
+        threatByLesser[KING]   = 0;
     }
 
     MoveList<Type> ml(pos);  // move generation
 
     ExtMove* it = cur;
-    for (auto move : ml)
+
+    if constexpr (Type == CAPTURES)
     {
-        ExtMove& m = *it++;
-        m          = move;
-
-        const Square    from          = m.from_sq();
-        const Square    to            = m.to_sq();
-        const Piece     pc            = pos.moved_piece(m);
-        const PieceType pt            = type_of(pc);
-        const Piece     capturedPiece = pos.piece_on(to);
-
-        if constexpr (Type == CAPTURES)
-            m.value = (*captureHistory)[pc][to][type_of(capturedPiece)]
-                    + 7 * int(PieceValue[capturedPiece]);
-
-        else if constexpr (Type == QUIETS)
+        const auto& capHist = *captureHistory;
+        for (auto move : ml)
         {
+            ExtMove& m          = *it++;
+            m                   = move;
+            const Square to     = m.to_sq();
+            const Piece  pc     = pos.moved_piece(m);
+            const Piece  capPc  = pos.piece_on(to);
+            m.value             = capHist[pc][to][type_of(capPc)] + 7 * int(PieceValue[capPc]);
+        }
+    }
+    else if constexpr (Type == QUIETS)
+    {
+        const auto&     mainHist     = (*mainHistory)[us];
+        const auto*     pawnHist     = &sharedHistory->pawn_entry(pos)[0][0];
+        const auto*     ch0          = &(*continuationHistory[0])[0][0];
+        const auto*     ch1          = &(*continuationHistory[1])[0][0];
+        const auto*     ch2          = &(*continuationHistory[2])[0][0];
+        const auto*     ch3          = &(*continuationHistory[3])[0][0];
+        const auto*     ch5          = &(*continuationHistory[5])[0][0];
+        const Bitboard* checkSquares = pos.state()->checkSquares;
+        const auto*     lph      = (ply < LOW_PLY_HISTORY_SIZE) ? &(*lowPlyHistory)[ply] : nullptr;
+        const int       plyDiv   = 1 + ply;
+
+        for (auto move : ml)
+        {
+            ExtMove& m = *it++;
+            m          = move;
+
+            const Square    from = m.from_sq();
+            const Square    to   = m.to_sq();
+            const Piece     pc   = pos.moved_piece(m);
+            const PieceType pt   = type_of(pc);
+            const usize     pcTo = pc * SQUARE_NB + to;
+
             // Use a local accumulator to eliminate redundant stores to m.value
 
             // histories
-            int value = 2 * (*mainHistory)[us][m.raw()];
-            value += 2 * sharedHistory->pawn_entry(pos)[pc][to];
-            value += (*continuationHistory[0])[pc][to];
-            value += (*continuationHistory[1])[pc][to];
-            value += (*continuationHistory[2])[pc][to];
-            value += (*continuationHistory[3])[pc][to];
-            value += (*continuationHistory[5])[pc][to];
-
-            // bonus for checks
-            value += ((pos.check_squares(pt) & to) && pos.see_ge(m, -75)) * 16384;
+            int value = 2 * mainHist[m.raw()] + 2 * pawnHist[pcTo] + ch0[pcTo] + ch1[pcTo]
+                      + ch2[pcTo] + ch3[pcTo] + ch5[pcTo];
 
             // penalty for moving to a square threatened by a lesser piece
             // or bonus for escaping an attack by a lesser piece.
             int v = 20 * (bool(threatByLesser[pt] & from) - bool(threatByLesser[pt] & to));
             value += PieceValue[pt] * v;
 
+            if (lph)
+                value += 8 * (*lph)[m.raw()] / plyDiv;
 
-            if (ply < LOW_PLY_HISTORY_SIZE)
-                value += 8 * (*lowPlyHistory)[ply][m.raw()] / (1 + ply);
+            // bonus for checks
+            if ((checkSquares[pt] & to) && pos.see_ge(m, -75))
+                value += 16384;
 
             m.value = value;
         }
-
-        else  // Type == EVASIONS
+    }
+    else  // Type == EVASIONS
+    {
+        const auto& mainHist = (*mainHistory)[us];
+        const auto& ch0      = *continuationHistory[0];
+        for (auto move : ml)
         {
+            ExtMove& m      = *it++;
+            m               = move;
+            const Square to = m.to_sq();
+            const Piece  pc = pos.moved_piece(m);
+
             if (pos.capture_stage(m))
-                m.value = PieceValue[capturedPiece] + (1 << 28);
+                m.value = PieceValue[pos.piece_on(to)] + (1 << 28);
             else
-                m.value = (*mainHistory)[us][m.raw()] + (*continuationHistory[0])[pc][to];
+                m.value = mainHist[m.raw()] + ch0[pc][to];
         }
     }
     return it;
