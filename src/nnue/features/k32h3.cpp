@@ -54,13 +54,8 @@ void K32H3::write_indices(const std::array<Piece, SQUARE_NB>& oldPieces,
     // six bits. Therefore no carry crosses bit 6, and
     // (s ^ orient) + psi[pc] + kingBucket == s ^ (psi[pc] + kingBucket + orient),
     // allowing the orientation to be folded into the per-piece lookup offset.
-    const u16     flip       = 56 * perspective;
-    const u16     orient     = u16(OrientTBL[ksq]) ^ flip;
-    const u16     kingBucket = u16(KingBuckets[int(ksq) ^ flip]);
-    const __m512i psi =
-      _mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*) PieceSquareIndex[perspective]));
     const __m512i psi_plus_offset =
-      _mm512_add_epi16(psi, _mm512_set1_epi16(u16(kingBucket + orient)));
+      _mm512_castsi256_si512(_mm256_load_si256((const __m256i*) Offsets[perspective][ksq].data()));
 
     __m512i removed_squares = _mm512_maskz_compress_epi8(removedBB, AllSquares);
     __m512i added_squares   = _mm512_maskz_compress_epi8(addedBB, AllSquares);
@@ -81,43 +76,6 @@ void K32H3::write_indices(const std::array<Piece, SQUARE_NB>& oldPieces,
     _mm512_storeu_si512(write_added, added_indices);
 }
 #endif
-
-// Index of a feature within its block for a given king position and another piece on
-// some square
-
-IndexType K32H3::make_index(Color perspective, Square s, Piece pc, Square ksq) {
-    alignas(64) static constexpr auto offsets = [] {
-        std::array<std::array<u16, PIECE_NB>, COLOR_NB * SQUARE_NB> table{};
-        for (int c = 0; c < COLOR_NB; ++c)
-            for (int sq = 0; sq < SQUARE_NB; ++sq)
-            {
-                const u16 flip       = 56 * c;
-                const u16 orient     = u16(OrientTBL[sq]) ^ flip;
-                const u16 kingBucket = u16(KingBuckets[sq ^ flip]);
-                for (int pieceIndex = 0; pieceIndex < PIECE_NB; ++pieceIndex)
-                    table[c * SQUARE_NB + sq][pieceIndex] =
-                      PieceSquareIndex[c][pieceIndex] + kingBucket + orient;
-            }
-        return table;
-    }();
-
-    return IndexType(s) ^ offsets[perspective * SQUARE_NB + ksq][pc];
-}
-
-// Get a list of indices for recently changed features
-
-void K32H3::append_changed_indices(
-  Color perspective, Square ksq, const DiffType& diff, IndexList& removed, IndexList& added) {
-    removed.push_back(make_index(perspective, diff.from, diff.pc, ksq));
-    if (diff.to != SQ_NONE)
-        added.push_back(make_index(perspective, diff.to, diff.pc, ksq));
-
-    if (diff.remove_sq != SQ_NONE)
-        removed.push_back(make_index(perspective, diff.remove_sq, diff.remove_pc, ksq));
-
-    if (diff.add_sq != SQ_NONE)
-        added.push_back(make_index(perspective, diff.add_sq, diff.add_pc, ksq));
-}
 
 int K32H3::block(const Position& pos, Color perspective) {
     return block(block_state(pos), perspective);
