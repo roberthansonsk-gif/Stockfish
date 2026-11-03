@@ -97,7 +97,9 @@ class AccumulatorStack {
    public:
     static constexpr usize MaxSize = MAX_PLY + 1;
 
-    [[nodiscard]] const AccumulatorState& latest() const noexcept;
+    [[nodiscard]] const AccumulatorState& latest() const noexcept {
+        return accumulators[size - 1];
+    }
 
     void     reset() noexcept;
     Dirties& push(const Position& pos) noexcept;
@@ -109,7 +111,7 @@ class AccumulatorStack {
                   [[maybe_unused]] AccumulatorCaches& cache) noexcept;
 
    private:
-    [[nodiscard]] AccumulatorState& mut_latest() noexcept;
+    [[nodiscard]] AccumulatorState& mut_latest() noexcept { return accumulators[size - 1]; }
 
     void evaluate_side(Color                     perspective,
                        const Position&           pos,

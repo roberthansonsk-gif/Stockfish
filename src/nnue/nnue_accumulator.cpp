@@ -68,10 +68,6 @@ void update_accumulator_hybrid(Color                     perspective,
 
 }
 
-const AccumulatorState& AccumulatorStack::latest() const noexcept { return accumulators[size - 1]; }
-
-AccumulatorState& AccumulatorStack::mut_latest() noexcept { return accumulators[size - 1]; }
-
 void AccumulatorStack::reset() noexcept {
     accumulators[0].dirtyPiece = {};
     new (&accumulators[0].dirtyThreats) DirtyThreats;
