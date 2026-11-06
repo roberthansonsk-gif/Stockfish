@@ -169,11 +169,13 @@ MovePicker::MovePicker(const Position&              p,
                        Move                         ttm,
                        const ButterflyHistory*      mh,
                        const CapturePieceToHistory* cph,
-                       const PieceToHistory* const* ch) :
+                       const PieceToHistory* const* ch,
+                       const SharedHistories*       sh) :
     pos(p),
     mainHistory(mh),
     captureHistory(cph),
     continuationHistory(ch),
+    sharedHistory(sh),
     ttMove(ttm) {
 
     first_stage = pos.checkers() ? EVASION : QSEARCH;
@@ -283,6 +285,8 @@ ExtMove* MovePicker::generate_and_score() {
     {
         const auto& mainHist = (*mainHistory)[us];
         const auto& ch0      = *continuationHistory[0];
+        const auto& capHist  = *captureHistory;
+        const auto& pawnHist = sharedHistory->pawn_entry(pos);
         for (auto move : ml)
         {
             ExtMove& m      = *it++;
@@ -291,9 +295,13 @@ ExtMove* MovePicker::generate_and_score() {
             const Piece  pc = pos.moved_piece(m);
 
             if (pos.capture_stage(m))
-                m.value = PieceValue[pos.piece_on(to)] + (1 << 28);
+            {
+                const Piece capturedPiece = pos.piece_on(to);
+                m.value = 7 * int(PieceValue[capturedPiece])
+                        + capHist[pc][to][type_of(capturedPiece)] + (1 << 28);
+            }
             else
-                m.value = mainHist[m.raw()] + ch0[pc][to];
+                m.value = mainHist[m.raw()] + ch0[pc][to] + pawnHist[pc][to];
         }
     }
     return it;

@@ -78,8 +78,8 @@ class SqrClippedReLU {
         static_assert(InputDimensions % 32 == 0,
                       "propagate_pair() needs a tail path if L2/L3 change to multiple of 16");
 
-        constexpr IndexType NumChunks       = InputDimensions / 32;
-        constexpr int       SimdShiftAmount = WeightScaleBitsLocal * 2 + 7 - 16;
+        [[maybe_unused]] constexpr IndexType NumChunks       = InputDimensions / 32;
+        constexpr int                        SimdShiftAmount = WeightScaleBitsLocal * 2 + 7 - 16;
 
     #if defined(USE_AVX512)
         const auto in      = reinterpret_cast<const __m512i*>(input);
