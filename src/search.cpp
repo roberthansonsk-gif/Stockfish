@@ -659,45 +659,36 @@ bool Search::Worker::iterative_deepening() {
 }
 
 
-void Search::Worker::do_move(Position& pos, const Move move, StateInfo& st, Stack* const ss) {
-    do_move(pos, move, st, pos.gives_check(move), pos.capture_stage(move), ss);
-}
-
 void Search::Worker::do_move(Position&    pos,
                              const Move   move,
                              StateInfo&   st,
                              const bool   givesCheck,
                              const bool   capture,
                              Stack* const ss) {
+    assert(ss != nullptr);
+
     // prefetch_key() does not model castling, en passant or promotion exactly.
     // The correction-history prefetches also approximate castling and promotion.
     // For these rare moves the prefetches land on unused lines.
     prefetch(tt.get_cluster(pos.prefetch_key(move)));
 
-    if (ss != nullptr)
-    {
-        const Piece  pc = pos.moved_piece(move);
-        const Square to = move.to_sq();
+    const Piece  pc = pos.moved_piece(move);
+    const Square to = move.to_sq();
 
-        prefetch(&(*(ss - 1)->continuationCorrectionHistory)[pc][to]);
-        prefetch(&(*(ss - 3)->continuationCorrectionHistory)[pc][to]);
-        prefetch(&(*(ss - 5)->continuationCorrectionHistory)[pc][to]);
-    }
+    prefetch(&(*(ss - 1)->continuationCorrectionHistory)[pc][to]);
+    prefetch(&(*(ss - 3)->continuationCorrectionHistory)[pc][to]);
+    prefetch(&(*(ss - 5)->continuationCorrectionHistory)[pc][to]);
 
     ++nodes;
 
     Dirties& dirties = accumulatorStack.push(pos);
     pos.do_move(move, st, givesCheck, dirties, &sharedHistory);
 
-    if (ss != nullptr)
-    {
-        auto& dirtyPiece = dirties.dirtyPiece;
-        ss->currentMove  = move;
-        ss->continuationHistory =
-          &continuationHistory[ss->inCheck][capture][dirtyPiece.pc][move.to_sq()];
-        ss->continuationCorrectionHistory =
-          &continuationCorrectionHistory[dirtyPiece.pc][move.to_sq()];
-    }
+    auto& dirtyPiece = dirties.dirtyPiece;
+    ss->currentMove  = move;
+    ss->continuationHistory =
+      &continuationHistory[ss->inCheck][capture][dirtyPiece.pc][move.to_sq()];
+    ss->continuationCorrectionHistory = &continuationCorrectionHistory[dirtyPiece.pc][move.to_sq()];
 }
 
 void Search::Worker::do_null_move(Position& pos, StateInfo& st, Stack* const ss) {
