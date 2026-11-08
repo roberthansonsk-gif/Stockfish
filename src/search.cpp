@@ -1381,8 +1381,11 @@ moves_loop:  // When in check, search starts here
             r -= 2179;
 
         if (capture)
-            ss->statScore = 873 * int(PieceValue[pos.captured_piece()]) / 128
-                          + captureHistory[movedPiece][move.to_sq()][type_of(pos.captured_piece())];
+            ss->statScore =
+              873 * int(PieceValue[pos.captured_piece()]) / 128
+              + captureHistory[movedPiece][move.to_sq()]
+                              [move.type_of() == EN_PASSANT ? NO_PIECE_TYPE
+                                                            : type_of(pos.captured_piece())];
         else
             ss->statScore =
               (2252 * mainHistory[us][move.raw()] + 1126 * (*contHist[0])[movedPiece][move.to_sq()]
@@ -1650,9 +1653,12 @@ moves_loop:  // When in check, search starts here
     {
         assert(priorCapture);
 
-        Piece capturedPiece = pos.captured_piece();
-        assert(capturedPiece != NO_PIECE);
-        captureHistory[pos.piece_on(prevSq)][prevSq][type_of(capturedPiece)] << 892;
+        Move  prevMove = (ss - 1)->currentMove;
+        Piece movedPc =
+          prevMove.type_of() == PROMOTION ? make_piece(~us, PAWN) : pos.piece_on(prevSq);
+        PieceType captType =
+          prevMove.type_of() == EN_PASSANT ? NO_PIECE_TYPE : type_of(pos.captured_piece());
+        captureHistory[movedPc][prevSq][captType] << 892;
     }
 
     if (PvNode)
