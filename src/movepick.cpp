@@ -204,6 +204,9 @@ ExtMove* MovePicker::generate_and_score() {
 
     MoveList<Type> ml(pos);  // move generation
 
+    ExtMove* checkMoves[MAX_MOVES];
+    int      checkCount = 0;
+
     ExtMove* it = cur;
     for (auto move : ml)
     {
@@ -233,19 +236,18 @@ ExtMove* MovePicker::generate_and_score() {
             value += (*continuationHistory[3])[pc][to];
             value += (*continuationHistory[5])[pc][to];
 
-            // bonus for checks
-            value += ((pos.check_squares(pt) & to) && pos.see_ge(m, -75)) * 16384;
-
             // penalty for moving to a square threatened by a lesser piece
             // or bonus for escaping an attack by a lesser piece.
             int v = 20 * (bool(threatByLesser[pt] & from) - bool(threatByLesser[pt] & to));
             value += PieceValue[pt] * v;
 
-
             if (ply < LOW_PLY_HISTORY_SIZE)
                 value += 8 * (*lowPlyHistory)[ply][m.raw()] / (1 + ply);
 
             m.value = value;
+
+            if (pos.check_squares(pt) & to)
+                checkMoves[checkCount++] = &m;
         }
 
         else  // Type == EVASIONS
@@ -256,6 +258,11 @@ ExtMove* MovePicker::generate_and_score() {
                 m.value = (*mainHistory)[us][m.raw()] + (*continuationHistory[0])[pc][to];
         }
     }
+    if constexpr (Type == QUIETS)
+        for (int i = 0; i < checkCount; ++i)
+            if (pos.see_ge(*checkMoves[i], -75))
+                checkMoves[i]->value += 16384;
+
     return it;
 }
 
