@@ -27,21 +27,6 @@
 
 namespace Stockfish {
 
-enum Stages : i8 {
-    TT,
-    INIT_FIRST_STAGE,
-
-    GOOD_CAPTURE,
-    GOOD_QUIET,
-    BAD_MOVES,
-
-    QSEARCH,
-
-    EVASION,
-
-    PROBCUT,
-};
-
 namespace {
 
 #ifdef USE_AVX512
@@ -259,31 +244,13 @@ ExtMove* MovePicker::generate_and_score() {
     return it;
 }
 
-// Returns the next move satisfying a predicate function.
-// This never returns the TT move, as it was emitted before.
-template<typename Pred>
-Move MovePicker::select(Pred filter) {
-
-    for (; cur < endCur; ++cur)
-        if (*cur != ttMove && filter())
-            return *cur++;
-
-    return Move::none();
-}
-
-// This is the most important method of the MovePicker class. We emit one
-// new legal move on every call until there are no more moves left,
-// picking the move with the highest score from a list of generated moves.
-Move MovePicker::next_move() {
+// Emits the next legal move for stages requiring move generation or SEE filtering.
+Move MovePicker::select_next() {
 
     constexpr int goodQuietThreshold = -14000;
 dispatch:
     switch (stage)
     {
-
-    case TT :
-        stage = INIT_FIRST_STAGE;
-        return ttMove;
 
     case INIT_FIRST_STAGE :
         cur = endBadMoves = moves;

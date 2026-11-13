@@ -28,7 +28,18 @@ namespace Stockfish {
 
 class Position;
 
-enum Stages : i8;
+enum Stages : i8 {
+    TT,
+    INIT_FIRST_STAGE,
+
+    GOOD_CAPTURE,
+    GOOD_QUIET,
+    PROBCUT,
+
+    BAD_MOVES,
+    QSEARCH,
+    EVASION,
+};
 
 // The MovePicker class is used to pick one legal move at a time from the
 // current position. The most important method is next_move(), which emits one
@@ -51,12 +62,27 @@ class MovePicker {
                const SharedHistories*,
                int);
     MovePicker(const Position&, Move, int, const CapturePieceToHistory*);
-    Move next_move();
+    Move next_move() {
+        if (stage == TT)
+        {
+            stage = INIT_FIRST_STAGE;
+            return ttMove;
+        }
+        if (stage >= BAD_MOVES)
+            return select([]() { return true; });
+        return select_next();
+    }
     void skip_quiet_moves();
 
    private:
+    Move select_next();
     template<typename Pred>
-    Move select(Pred);
+    Move select(Pred filter) {
+        for (; cur < endCur; ++cur)
+            if (*cur != ttMove && filter())
+                return *cur++;
+        return Move::none();
+    }
     template<GenType T>
     ExtMove* generate_and_score();
 
