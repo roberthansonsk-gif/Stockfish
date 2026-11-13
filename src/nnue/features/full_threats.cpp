@@ -34,10 +34,10 @@
 namespace Stockfish::Eval::NNUE::Features {
 
 struct alignas(64) ThreatLUTs {
-    // [attacker][attacked][from < to]
-    std::array<std::array<std::array<u32, 2>, PIECE_NB>, PIECE_NB> lut1{};
-    // [pt][from][to]
-    std::array<std::array<std::array<u16, SQUARE_NB>, SQUARE_NB>, PIECE_TYPE_NB> lut2{};
+    // [attacked][attacker]: low u16 = base[from >= to], high u16 = base[from < to] - 0x8000u
+    std::array<std::array<u32, PIECE_NB>, PIECE_NB> lut1{};
+    // [pt][(from << 6) | to]: bit 15 = (from < to), bits 0..10 = piece-pair offset
+    std::array<std::array<i16, SQUARE_NB * SQUARE_NB>, PIECE_TYPE_NB> lut2{};
 };
 
 constexpr std::array<Piece, 12> AllPieces = {
@@ -49,6 +49,12 @@ constexpr auto init_threat_luts() {
     ThreatLUTs                     tables{};
     std::array<u16, PIECE_TYPE_NB> offsets{};
 
+    constexpr u32 ExcludedEntry =
+      u32(FullThreats::Dimensions) | (u32(FullThreats::Dimensions - 0x8000u) << 16);
+    for (auto& row : tables.lut1)
+        for (auto& entry : row)
+            entry = ExcludedEntry;
+
     for (PieceType pt : {PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING})
     {
         u16 offset = 0;
@@ -56,11 +62,12 @@ constexpr auto init_threat_luts() {
         {
             for (Square to = SQ_A1; to <= SQ_H8; ++to)
             {
-                Bitboard attacks = (pt != PAWN) ? Attacks::PseudoAttacks[pt][from]
-                                 : (to < from)  ? Attacks::PseudoAttacks[BLACK][from]
-                                                : Attacks::PseudoAttacks[WHITE][from];
-                tables.lut2[pt][from][to] =
-                  offset + constexpr_popcount(((1ULL << to) - 1) & attacks);
+                Bitboard  attacks = (pt != PAWN) ? Attacks::PseudoAttacks[pt][from]
+                                  : (to < from)  ? Attacks::PseudoAttacks[BLACK][from]
+                                                 : Attacks::PseudoAttacks[WHITE][from];
+                const u16 idx     = offset + constexpr_popcount(((1ULL << to) - 1) & attacks);
+                tables.lut2[pt][(int(from) << 6) | int(to)] =
+                  static_cast<i16>(idx | (u16(from < to) << 15));
             }
 
             if (pt != PAWN)
@@ -90,10 +97,11 @@ constexpr auto init_threat_luts() {
               cumulativeOffset
               + (color_of(attacked) * (validTargets / 2) + map) * cumulativePieceOffset;
 
-            bool excluded                      = map < 0;
-            tables.lut1[attacker][attacked][0] = excluded ? FullThreats::Dimensions : feature;
-            tables.lut1[attacker][attacked][1] =
-              excluded || semi_excluded ? FullThreats::Dimensions : feature;
+            bool      excluded = map < 0;
+            const u16 lo       = excluded ? FullThreats::Dimensions : feature;
+            const u16 hi =
+              (excluded || semi_excluded ? FullThreats::Dimensions : feature) - 0x8000u;
+            tables.lut1[attacked][attacker] = u32(lo) | (u32(hi) << 16);
         }
 
         cumulativeOffset += validTargets * cumulativePieceOffset;
@@ -104,19 +112,22 @@ constexpr auto init_threat_luts() {
 
 constexpr ThreatLUTs threat_luts = init_threat_luts();
 
+sf_always_inline IndexType resolve_threat_index(u32 l1, i16 v2) {
+    return u16((v2 < 0 ? l1 >> 16 : l1) + u32(v2));
+}
+
 // Index of a feature for a given king position and another piece on some square
 sf_always_inline IndexType FullThreats::make_index(
   Color perspective, Piece attacker, Square from, Square to, Piece attacked, Square ksq) {
-    const u8 orientation   = OrientTBL[ksq] ^ (56 * perspective);
-    unsigned from_oriented = u8(from) ^ orientation;
-    unsigned to_oriented   = u8(to) ^ orientation;
+    const unsigned orient  = (OrientTBL[ksq] ^ (56 * perspective)) * 65;
+    const unsigned sq_pair = ((unsigned(from) << 6) | unsigned(to)) ^ orient;
 
     const u8 swap              = 8 * perspective;
     unsigned attacker_oriented = attacker ^ swap;
     unsigned attacked_oriented = attacked ^ swap;
 
-    return threat_luts.lut1[attacker_oriented][attacked_oriented][from_oriented < to_oriented]
-         + threat_luts.lut2[type_of(attacker)][from_oriented][to_oriented];
+    return resolve_threat_index(threat_luts.lut1[attacked_oriented][attacker_oriented],
+                                threat_luts.lut2[type_of(attacker)][sq_pair]);
 }
 
 // Get a list of indices for active features in ascending order
@@ -180,19 +191,17 @@ void FullThreats::append_changed_indices(Color                   perspective,
                                          IndexList&              added,
                                          const ThreatWeightType* prefetchBase,
                                          IndexType               prefetchStride) {
-    const unsigned orient    = OrientTBL[ksq] ^ (56 * perspective);
+    const unsigned orient    = (OrientTBL[ksq] ^ (56 * perspective)) * 65;
     const unsigned pair_swap = 0x88 * perspective;
-    const auto*    lut1_flat = &threat_luts.lut1[0][0];
+    const u32*     lut1_flat = &threat_luts.lut1[0][0];
+    const i16*     lut2_flat = &threat_luts.lut2[0][0];
 
     for (const auto& dirty : diff.list)
     {
-        const u32      raw   = dirty.raw();
-        const unsigned from  = u8(raw) ^ orient;
-        const unsigned to    = u8(raw >> 8) ^ orient;
-        const unsigned pair  = u8(raw >> 16);
-        const auto&    plut2 = threat_luts.lut2[(pair >> 4) & 7];
-
-        const IndexType index = lut1_flat[pair ^ pair_swap][from < to] + plut2[from][to];
+        const u32       raw   = dirty.raw();
+        const unsigned  idx2  = (raw & 0x7FFFu) ^ orient;
+        const unsigned  pair  = u8(raw >> 12) ^ pair_swap;
+        const IndexType index = resolve_threat_index(lut1_flat[pair], lut2_flat[idx2]);
 
         if (prefetchBase)
             prefetch<PrefetchRw::READ, PrefetchLoc::LOW>(reinterpret_cast<const void*>(
@@ -214,25 +223,21 @@ void FullThreats::append_changed_indices_both(Square                  white_ksq,
                                               IndexList&              black_added,
                                               const ThreatWeightType* prefetchBase,
                                               IndexType               prefetchStride) {
-    const unsigned w_orient  = OrientTBL[white_ksq];
-    const unsigned b_orient  = OrientTBL[black_ksq] ^ 56;
-    const auto*    lut1_flat = &threat_luts.lut1[0][0];
+    const unsigned w_orient  = OrientTBL[white_ksq] * 65;
+    const unsigned b_orient  = (OrientTBL[black_ksq] ^ 56) * 65;
+    const u32*     lut1_flat = &threat_luts.lut1[0][0];
+    const i16*     lut2_flat = &threat_luts.lut2[0][0];
 
     for (const auto& dirty : diff.list)
     {
-        const u32      raw   = dirty.raw();
-        const unsigned from  = u8(raw);
-        const unsigned to    = u8(raw >> 8);
-        const unsigned pair  = u8(raw >> 16);
-        const auto&    plut2 = threat_luts.lut2[(pair >> 4) & 7];
+        const u32      raw  = dirty.raw();
+        const unsigned idx2 = raw & 0x7FFFu;
+        const unsigned pair = u8(raw >> 12);
 
-        const unsigned  w_from      = from ^ w_orient;
-        const unsigned  w_to        = to ^ w_orient;
-        const IndexType white_index = lut1_flat[pair][w_from < w_to] + plut2[w_from][w_to];
-
-        const unsigned  b_from      = from ^ b_orient;
-        const unsigned  b_to        = to ^ b_orient;
-        const IndexType black_index = lut1_flat[pair ^ 0x88][b_from < b_to] + plut2[b_from][b_to];
+        const IndexType white_index =
+          resolve_threat_index(lut1_flat[pair], lut2_flat[idx2 ^ w_orient]);
+        const IndexType black_index =
+          resolve_threat_index(lut1_flat[pair ^ 0x88], lut2_flat[idx2 ^ b_orient]);
 
         if (prefetchBase)
         {

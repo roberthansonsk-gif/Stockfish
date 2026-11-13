@@ -308,22 +308,22 @@ struct DirtyPiece {
 
 // Keep track of what threats change on the board (used by NNUE)
 struct DirtyThreat {
-    static constexpr int PcSqOffset         = 0;
-    static constexpr int ThreatenedSqOffset = 8;
+    static constexpr int ThreatenedSqOffset = 0;
+    static constexpr int PcSqOffset         = 6;
+    static constexpr int PcOffset           = 12;
     static constexpr int ThreatenedPcOffset = 16;
-    static constexpr int PcOffset           = 20;
 
     DirtyThreat() { /* don't initialize data */ }
     DirtyThreat(u32 raw) :
         data(raw) {}
     DirtyThreat(Piece pc, Piece threatened_pc, Square pc_sq, Square threatened_sq, bool add) :
-        data((u32(add) << 31) | (pc << PcOffset) | (threatened_pc << ThreatenedPcOffset)
-             | (threatened_sq << ThreatenedSqOffset) | (pc_sq << PcSqOffset)) {}
+        data((u32(add) << 31) | (threatened_pc << ThreatenedPcOffset) | (pc << PcOffset)
+             | (pc_sq << PcSqOffset) | (threatened_sq << ThreatenedSqOffset)) {}
 
     Piece  pc() const { return static_cast<Piece>(data >> PcOffset & 0xf); }
     Piece  threatened_pc() const { return static_cast<Piece>(data >> ThreatenedPcOffset & 0xf); }
-    Square threatened_sq() const { return static_cast<Square>(data >> ThreatenedSqOffset & 0xff); }
-    Square pc_sq() const { return static_cast<Square>(data >> PcSqOffset & 0xff); }
+    Square threatened_sq() const { return static_cast<Square>(data >> ThreatenedSqOffset & 0x3f); }
+    Square pc_sq() const { return static_cast<Square>(data >> PcSqOffset & 0x3f); }
     bool   add() const { return data >> 31; }
     u32    raw() const { return data; }
 
